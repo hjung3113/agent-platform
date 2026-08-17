@@ -1,6 +1,9 @@
 # ADR-0007 — Immutable event lineage is authoritative run state
 
-Status: Accepted
+Status: Superseded by [ADR-0008](0008-run-state-authority.md)
+
+## Supersession
+ADR-0008 is the canonical run-state authority decision. This ADR remains as historical decision context and must not be referenced as the current normative authority record.
 
 ## Decision
 Operational run state has exactly one authoritative interpretation: the immutable transition lineage admitted and published by the Kernel.

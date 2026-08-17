@@ -55,4 +55,4 @@ Failure, cancellation, retry, repair, replan, reconciliation, checkpoint, and te
 
 A Receipt is explicitly typed as `checkpoint` or `terminal`. A checkpoint Receipt records durable progress but never terminates the run; only a terminal Receipt establishes terminal run state.
 
-See [ADR-0007](../adr/0007-run-state-authority.md) for the authority decision and [Protocol Versioning and Migration](../architecture/versioning-and-migrations.md) for compatibility/replay rules. Concrete persistence, fencing/CAS, canonicalization encoding, version-reader packaging, compatibility-registry storage, and filesystem crash-consistency mechanisms remain implementation concerns that require validation on supported platforms.
+See [ADR-0008](../adr/0008-run-state-authority.md) for the authority decision and [Protocol Versioning and Migration](../architecture/versioning-and-migrations.md) for compatibility/replay rules. Concrete persistence, fencing/CAS, canonicalization encoding, version-reader packaging, compatibility-registry storage, and filesystem crash-consistency mechanisms remain implementation concerns that require validation on supported platforms.

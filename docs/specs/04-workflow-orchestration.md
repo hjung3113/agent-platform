@@ -16,7 +16,7 @@ An admitted Workflow Revision is immutable and binds the complete orchestration 
 
 Admission must reject unknown task references, self-dependencies, structural cycles, ambiguous dependency semantics, missing required policies, and incompatible graph references.
 
-Every Workflow Revision, including one produced by replan, must pass an independent Plan Check bound to that exact canonical revision digest before Kernel admission. A passing Plan Check is required semantic evidence when policy requires it, but never authorizes admission by itself. Kernel must separately apply deterministic admission predicates and require Human Authority approval for material scope/policy changes. A previously passing Plan Check cannot authorize changed canonical workflow content.
+Whether independent Plan Check is required is determined by the workflow/risk policy through a deterministic predicate over the exact candidate revision and its admitted policy inputs. When required, the Plan Check must be independent from the authoring Planner and bound to the exact canonical Workflow Revision digest before Kernel admission. A simple workflow may omit the independent Plan Check only when that deterministic policy permits it. A passing Plan Check is semantic evidence only and never authorizes admission by itself. Kernel separately applies deterministic admission predicates and requires Human Authority approval for material scope/policy changes. Changed canonical workflow content cannot reuse a previously passing Plan Check.
 
 ## Deterministic eligibility and next action
 Eligibility is a pure projection of:
@@ -49,7 +49,7 @@ These outcomes are distinct:
 
 - **retry**: another attempt of the same admitted task contract
 - **repair**: bounded corrective attempt that does not change the admitted workflow contract
-- **replan**: proposes a new Workflow Revision and therefore requires a new Plan Check and Kernel admission
+- **replan**: proposes a successor Workflow Revision and therefore requires Kernel admission; the Plan Check requirement is reevaluated for that exact successor by the deterministic workflow/risk policy
 - **material decision**: requires Human Authority before a dependent revision can be admitted
 - **blocked**: no admitted transition is currently safe or permitted
 
@@ -68,7 +68,7 @@ A task/attempt in `reconciliation_required` blocks retry, successor execution, o
 
 ## Authority boundary
 - Conductor and Architect/Planner may propose task splits, risk profile, repair, replan, and candidate Workflow Revisions.
-- Plan Checker independently judges the exact candidate revision before admission; its verdict is candidate semantic evidence, not publication/admission authority.
+- When policy requires independent Plan Check, Plan Checker judges the exact candidate revision before admission; its verdict is candidate semantic evidence, not publication/admission authority.
 - Deterministic orchestration logic computes eligibility and transition candidates from admitted state; it has no independent publication authority.
 - Human Authority approves material scope/policy changes before dependent admission.
 - Kernel is the sole authority that admits Workflow Revisions and publishes authoritative run transitions.

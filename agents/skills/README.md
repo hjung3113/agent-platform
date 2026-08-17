@@ -21,5 +21,19 @@ Recommended buckets:
 Prefer small composable skills over a monolithic process owner.
 Use progressive disclosure and keep trigger descriptions compact.
 
+## Skill contract
+Every managed skill has enough metadata to make routing, portability, context cost, provenance, and regression behavior explicit:
+- stable skill identity and version
+- invocation mode: user-invoked, model-invoked, or internal composition only
+- compact trigger/selection description
+- required canonical actions and capability requirements
+- runtime-neutral behavior plus any explicit runtime-extension dependency
+- model-visible disclosure/context cost used by context budgeting
+- declared skill dependencies when composition is required
+- behavior/eval references and last accepted eval identity for managed/upstream skills
+- upstream provenance, pinned revision/content identity, license, and local delta identity when vendored or imported
+
+Skill metadata supports routing and validation but never grants publication, external-effect, filesystem, network, or secret authority by itself. Those capabilities remain admitted per Attempt/Host policy.
+
 Upstream candidates are recorded in `docs/research/direct-reuse-candidates.md`
 and `vendor/upstream-skills.lock.yaml`.

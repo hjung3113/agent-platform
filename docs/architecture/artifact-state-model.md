@@ -71,7 +71,7 @@ Agents, adapters, hosts, orchestration helpers, and tools may produce candidates
 Canonical repository placement, schema validity, producer role, or verdict text cannot bypass admission.
 
 ## Authoritative run state
-Per [ADR-0007](../adr/0007-run-state-authority.md), immutable transition lineage admitted and published by the Kernel is the sole authoritative operational run state.
+Per [ADR-0008](../adr/0008-run-state-authority.md), immutable transition lineage admitted and published by the Kernel is the sole authoritative operational run state.
 
 Authoritative transition publication is the protocol commit point. Current-state/run-head documents are derived checkpoints or caches only and cannot introduce facts absent from lineage.
 
