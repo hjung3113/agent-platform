@@ -33,4 +33,4 @@ Authoritative publication of an immutable transition is the protocol commit poin
 ## Lifecycle distinctions
 Failure, cancellation, retry, repair, replan, reconciliation, and terminal completion are semantically distinct protocol outcomes/transitions. Process disappearance alone does not imply any terminal state.
 
-See ADR-0007 for the authority decision. Concrete persistence, fencing/CAS, and filesystem crash-consistency mechanisms remain implementation concerns that require validation on supported platforms.
+See [ADR-0007](../adr/0007-run-state-authority.md) for the authority decision. Concrete persistence, fencing/CAS, and filesystem crash-consistency mechanisms remain implementation concerns that require validation on supported platforms.

@@ -34,13 +34,19 @@ Verification evidence for another subject snapshot is stale by definition.
 ## Gate binding
 - Plan Check binds the canonical digest of the candidate plan/workflow it checked.
 - Kernel may admit a Workflow Revision only when its canonical content digest equals the passing Plan Check subject digest.
+- Every successor Workflow Revision created by replan requires a new Plan Check over that successor digest.
 - Any transformation that changes canonical content produces a new candidate requiring the applicable gate again.
 - Context Pack and Attempt Packet bind their authoritative source lineage and cannot silently replace sources.
 - Release Authorization binds the verified snapshot plus the expected target state; Release Receipt records the actual released identity.
 
 ## Publication authority
-There is one logical authoritative publication boundary.
-Agents, adapters, hosts, and tools may produce candidates or observations, and storage components may persist on behalf of the authority boundary, but they do not independently create competing authoritative records.
+There is one logical authoritative publication boundary: Kernel.
+Agents, adapters, hosts, orchestration helpers, and tools may produce candidates or observations, and storage components may persist on behalf of the authority boundary, but they do not independently create competing authoritative records.
+
+## Authoritative run state
+Per [ADR-0007](../adr/0007-run-state-authority.md), immutable transition lineage admitted and published by the Kernel is the sole authoritative operational run state.
+
+Authoritative transition publication is the protocol commit point. Current-state/run-head documents are derived checkpoints or caches only and cannot introduce facts absent from lineage.
 
 ## Derived projections
 - active decisions
@@ -50,14 +56,6 @@ Agents, adapters, hosts, and tools may produce candidates or observations, and s
 - phase summaries
 - dashboards
 
-A projection may be cached but must cite exact immutable source identities/digests and cannot introduce facts absent from authoritative lineage.
+A projection may be cached but must cite exact immutable source identities/digests. Missing, stale, corrupt, or conflicting projections are rebuilt or rejected from authoritative lineage.
 
-## Open design choice
-Two strong source patterns conflict:
-1. `thin-agent-harness`: append-only events are authoritative; replay derives current state.
-2. `opencode-orchestrated-agent-workflow`: one atomically replaced `run.json` is authoritative,
-   immutable artifacts surround it.
-
-Draft direction: immutable transition lineage is authoritative, with an atomically replaced
-run-head/projection only as a checkpoint/cache. Before implementation, run a crash-consistency
-spike on Windows + Linux filesystems and record ADR.
+Replay of the same accepted lineage must produce the same derived state, eligible task set, and transition inputs.
