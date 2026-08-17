@@ -14,6 +14,8 @@ CANONICAL_FORMAT = "agent-platform-json-v1"
 DIGEST_ALGORITHM = "sha256"
 MAX_SAFE_INTEGER = (1 << 53) - 1
 MIN_SAFE_INTEGER = -MAX_SAFE_INTEGER
+MAX_NESTING_DEPTH = 256
+_DIGEST_DOMAIN = CANONICAL_FORMAT.encode("ascii") + b"\x00"
 
 
 class CanonicalizationError(ValueError):
@@ -27,13 +29,29 @@ def _validate_string(value: str, path: str) -> None:
         raise CanonicalizationError(f"invalid Unicode string at {path}") from exc
 
 
-def _validate(value: Any, path: str = "$") -> None:
+def _utf16_sort_key(value: str) -> bytes:
+    """Return the language-neutral v1 object-key ordering key."""
+
+    return value.encode("utf-16-be")
+
+
+def _prepare(
+    value: Any,
+    path: str = "$",
+    depth: int = 0,
+    active_containers: set[int] | None = None,
+) -> Any:
+    if depth > MAX_NESTING_DEPTH:
+        raise CanonicalizationError(
+            f"value nesting at {path} exceeds the {MAX_NESTING_DEPTH}-level limit"
+        )
+
     if value is None or isinstance(value, bool):
-        return
+        return value
 
     if isinstance(value, str):
         _validate_string(value, path)
-        return
+        return value
 
     if isinstance(value, int):
         if not MIN_SAFE_INTEGER <= value <= MAX_SAFE_INTEGER:
@@ -41,7 +59,7 @@ def _validate(value: Any, path: str = "$") -> None:
                 f"integer at {path} is outside the interoperable JSON range "
                 f"[{MIN_SAFE_INTEGER}, {MAX_SAFE_INTEGER}]"
             )
-        return
+        return value
 
     if isinstance(value, float):
         raise CanonicalizationError(
@@ -49,20 +67,33 @@ def _validate(value: Any, path: str = "$") -> None:
             "encode exact decimal values as strings or schema-defined integers"
         )
 
-    if isinstance(value, list):
-        for index, item in enumerate(value):
-            _validate(item, f"{path}[{index}]")
-        return
+    if isinstance(value, (list, dict)):
+        if active_containers is None:
+            active_containers = set()
+        identity = id(value)
+        if identity in active_containers:
+            raise CanonicalizationError(f"cyclic container reference at {path}")
+        active_containers.add(identity)
+        try:
+            if isinstance(value, list):
+                return [
+                    _prepare(item, f"{path}[{index}]", depth + 1, active_containers)
+                    for index, item in enumerate(value)
+                ]
 
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise CanonicalizationError(
-                    f"object key at {path} must be a string, got {type(key).__name__}"
-                )
-            _validate_string(key, f"{path}.<key>")
-            _validate(item, f"{path}.{key}")
-        return
+            for key in value:
+                if not isinstance(key, str):
+                    raise CanonicalizationError(
+                        f"object key at {path} must be a string, got {type(key).__name__}"
+                    )
+                _validate_string(key, f"{path}.<key>")
+
+            return {
+                key: _prepare(value[key], f"{path}.{key}", depth + 1, active_containers)
+                for key in sorted(value, key=_utf16_sort_key)
+            }
+        finally:
+            active_containers.remove(identity)
 
     raise CanonicalizationError(f"unsupported value at {path}: {type(value).__name__}")
 
@@ -71,19 +102,20 @@ def canonical_json_bytes(value: Any) -> bytes:
     """Serialize a JSON value to the platform's canonical UTF-8 representation.
 
     v1 rules:
-    - object keys are sorted lexicographically;
+    - object keys are sorted by UTF-16 code units;
     - no insignificant whitespace is emitted;
     - Unicode is encoded directly as UTF-8 rather than ASCII escapes;
     - only null, strings, booleans, interoperable integers, arrays, and objects
       with string keys are accepted;
-    - floating point and non-JSON values fail closed.
+    - cyclic containers, excessive nesting, floating point, and non-JSON values
+      fail closed.
     """
 
-    _validate(value)
+    prepared = _prepare(value)
     serialized = json.dumps(
-        value,
+        prepared,
         ensure_ascii=False,
-        sort_keys=True,
+        sort_keys=False,
         separators=(",", ":"),
         allow_nan=False,
     )
@@ -91,7 +123,7 @@ def canonical_json_bytes(value: Any) -> bytes:
 
 
 def content_digest(value: Any) -> str:
-    """Return the stable SHA-256 digest of canonical content."""
+    """Return a format-bound SHA-256 digest of canonical content."""
 
-    digest = hashlib.sha256(canonical_json_bytes(value)).hexdigest()
-    return f"{DIGEST_ALGORITHM}:{digest}"
+    digest = hashlib.sha256(_DIGEST_DOMAIN + canonical_json_bytes(value)).hexdigest()
+    return f"{DIGEST_ALGORITHM}:{CANONICAL_FORMAT}:{digest}"
