@@ -92,7 +92,7 @@ class AdmissionTests(unittest.TestCase):
                     required_capabilities="file.read",  # type: ignore[arg-type]
                 )
             )
-            self.assertEqual(malformed.reason, "required_capabilities_not_satisfied")
+            self.assertEqual(malformed.reason, "invalid_attempt_request")
 
     def test_runtime_effective_permissions_cannot_widen_admitted_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -120,6 +120,30 @@ class AdmissionTests(unittest.TestCase):
                 )
             )
             self.assertEqual(admitted.status, AdmissionStatus.ADMITTED)
+
+    def test_malformed_request_shapes_fail_closed_without_exceptions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = make_profile()
+            malformed_requests = (
+                AttemptRequest("workspace", profile),  # type: ignore[arg-type]
+                AttemptRequest(root, profile, candidate_paths=("inside.txt",)),  # type: ignore[arg-type]
+                AttemptRequest(root, profile, context=(object(),)),  # type: ignore[arg-type]
+                AttemptRequest(root, profile, requested_effects=["push"]),  # type: ignore[arg-type]
+                AttemptRequest(root, profile, retain_evidence=1),  # type: ignore[arg-type]
+            )
+            for request in malformed_requests:
+                result = admit_attempt(request)
+                self.assertEqual(result.status, AdmissionStatus.BLOCKED, request)
+                self.assertEqual(result.reason, "invalid_attempt_request", request)
+
+    def test_workspace_root_must_be_an_existing_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root_file = Path(directory) / "workspace.txt"
+            root_file.write_text("not a directory", encoding="utf-8")
+            result = admit_attempt(AttemptRequest(root_file, make_profile()))
+            self.assertEqual(result.status, AdmissionStatus.BLOCKED)
+            self.assertEqual(result.reason, "workspace_root_not_directory")
 
     def test_traversal_absolute_alias_and_symlink_escape_are_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -215,6 +239,62 @@ class AdmissionTests(unittest.TestCase):
                     result.reason,
                     "missing_or_mismatched_external_authorization",
                     changed,
+                )
+
+    def test_external_authorization_requires_non_empty_identity_and_bindings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            permissions = PermissionEnvelope(external_effects=("push",))
+            profile = make_profile(permissions=permissions)
+            base = dict(
+                workspace_root=root,
+                runtime_profile=profile,
+                admitted_permissions=permissions,
+                subject="attempt-1",
+                snapshot_digest="snap",
+                plan_digest="plan",
+                requested_effects=("push",),
+                effect_target="repo:main",
+                effect_target_precondition="head:abc",
+            )
+            auth = ReleaseAuthorization(
+                authorization_id="auth-1",
+                subject="attempt-1",
+                effects=("push",),
+                target="repo:main",
+                target_precondition="head:abc",
+                snapshot_digest="snap",
+                plan_digest="plan",
+            )
+            malformed_authorizations = (
+                replace(auth, authorization_id=""),
+                replace(auth, subject=""),
+                replace(auth, snapshot_digest=""),
+                replace(auth, plan_digest=""),
+            )
+            for changed in malformed_authorizations:
+                result = admit_attempt(AttemptRequest(**base, authorization=changed))
+                self.assertEqual(
+                    result.reason,
+                    "missing_or_mismatched_external_authorization",
+                    changed,
+                )
+
+            empty_binding_cases = (
+                ("subject", replace(auth, subject="")),
+                ("snapshot_digest", replace(auth, snapshot_digest="")),
+                ("plan_digest", replace(auth, plan_digest="")),
+            )
+            for field_name, changed_auth in empty_binding_cases:
+                changed_request = dict(base)
+                changed_request[field_name] = ""
+                result = admit_attempt(
+                    AttemptRequest(**changed_request, authorization=changed_auth)
+                )
+                self.assertEqual(
+                    result.reason,
+                    "missing_or_mismatched_external_authorization",
+                    field_name,
                 )
 
     def test_ungranted_or_duplicate_external_effect_is_blocked(self) -> None:
