@@ -9,6 +9,8 @@ Rules already fixed:
 - migrations produce successor records/projections with provenance
 - adapter compatibility is not protocol compatibility
 - runtime update cannot silently change canonical contract meaning
+- runtime and adapter semantic identity is captured by a Runtime Capability Profile that includes runtime version, adapter version, effective configuration identity, tool/action mapping identity, and capability probe result
+- any Runtime Capability Profile identity change makes prior capability admission stale; execution under the changed profile requires re-admission even when protocol and runtime family names are unchanged
 - artifact identity uses one protocol-defined canonical representation and digest algorithm
 - semantically irrelevant serialization differences must not create implementation-specific identity
 - canonicalization rules cover field ordering/omission, path representation, text/newline normalization where applicable, and which metadata is excluded from content identity
