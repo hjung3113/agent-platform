@@ -10,10 +10,12 @@ Request + repository/decision context -> Architect/Planner -> candidate Workflow
 Plan Checker verifies goal coverage, dependencies, wiring, scope, locked decisions.
 Failure returns structured issues to planner. PASS permits Kernel admission only for the exact checked candidate digest.
 If admission-time normalization or transformation changes canonical content, the resulting candidate requires a new Plan Check.
+Every successor Workflow Revision proposed by replan returns through this same Plan Check gate.
 
 ## 3. Scheduling
 Kernel admits an immutable Workflow Revision whose canonical content digest matches the passing Plan Check subject digest.
-Orchestrator derives next eligible Task from that admitted revision.
+Deterministic orchestration logic derives the eligible set and transition candidate solely from the admitted revision plus authoritative immutable lineage.
+Kernel remains the only authority that publishes the resulting run transition.
 
 ## 4. Attempt compilation
 Context Compiler resolves authoritative sources and compiles Context Pack + Attempt Packet.
@@ -23,7 +25,8 @@ Stale, substituted, or conflicting source bindings fail closed.
 ## 5. Admission & execution
 Host probes selected runtime/transport, then binds an exact Workspace Snapshot before execution.
 Snapshot identity represents all release-relevant workspace content and state; repository HEAD alone is not sufficient when staged, unstaged, untracked, generated, or nested repository content can affect the result.
-The Attempt Packet binds the admitted workflow/task, context pack, workspace snapshot, runtime capability set, and allowed execution envelope.
+The Attempt Packet binds the admitted workflow/task, context pack, workspace snapshot, runtime capability set, resource claims, and allowed execution envelope.
+Parallel attempts may launch only when admitted logical resource claims prove non-conflict.
 
 ## 6. Observation
 Adapter/Host records Runtime Observation and the exact produced output snapshot identity.
@@ -35,13 +38,16 @@ Verifier checks declared acceptance using evidence bound to that same subject sn
 Evidence for another snapshot, attempt, input, or incompatible environment is stale and cannot satisfy the verdict.
 
 ## 8. Transition
-Kernel validates publication identity, schema/version, parent lineage, and digest bindings before choosing:
-- next Task
+Kernel validates publication identity, schema/version, parent lineage, digest bindings, admitted transition policy, and reconciliation/resource constraints before publishing one of:
+- next Task transition
 - repair Attempt
+- retry Attempt
 - replan request
 - material decision request
 - typed block
 - terminal Receipt
+
+Retry, repair, replan, material-decision, reconciliation, blocked, and terminal outcomes are distinct. Replan never mutates an admitted revision; it creates a successor candidate that returns to the Plan Check gate.
 
 A later artifact cannot substitute a different parent, result, snapshot, or evidence set without creating a new lineage successor and re-running the required gate.
 
@@ -59,12 +65,15 @@ Every authoritative artifact carries:
 - exact parent/source artifact identities and digests required by its contract
 
 Additionally:
-- Plan Check subject digest must equal the admitted Workflow Revision digest.
-- Context Pack and Attempt Packet cannot silently substitute authoritative inputs.
-- Workspace/output snapshot identity covers effective content, not only repository HEAD.
-- Result, Review, Verification, Release Authorization, and Release Receipt bind an explicit subject snapshot and parent lineage.
-- Evidence is accepted only for the exact snapshot and execution context it observed.
-- Authoritative publication has one logical writer boundary; components may propose or persist on its behalf but cannot independently create competing authority.
-- Unknown, stale, ambiguous, mismatched, or incompatible handoff state fails closed.
-- No step consumes pane/chat prose as workflow state.
-- No role both implements and final-verifies the same snapshot.
+- immutable Kernel-published transition lineage is the sole authoritative run state
+- Plan Check subject digest must equal the admitted Workflow Revision digest
+- every successor Workflow Revision requires a fresh Plan Check over that successor digest
+- eligible task derivation uses only the admitted revision and authoritative lineage and must be deterministic
+- Context Pack and Attempt Packet cannot silently substitute authoritative inputs
+- Workspace/output snapshot identity covers effective content, not only repository HEAD
+- Result, Review, Verification, Release Authorization, and Release Receipt bind an explicit subject snapshot and parent lineage
+- Evidence is accepted only for the exact snapshot and execution context it observed
+- Authoritative publication has one logical writer boundary; components may propose or persist on its behalf but cannot independently create competing authority
+- unresolved fan-in conflicts, ambiguous state, stale bindings, unknown resource conflicts, and reconciliation-required overlap fail closed
+- No step consumes pane/chat prose as workflow state
+- No role both implements and final-verifies the same snapshot
