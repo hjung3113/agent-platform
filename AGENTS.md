@@ -10,4 +10,5 @@
    with source, revision, license, and local modifications.
 8. Keep runtime state outside the repository checkout.
 9. Every implementation or design claim must point to an acceptance criterion or cited research/decision.
-10. Prefer the smallest mechanism that closes a demonstrated failure mode; do not add speculative seams.
+10. Before implementing a capability, inspect the reference repositories and research already recorded for this project. Prefer migrating or adapting proven upstream/reference implementations and patterns to the current architecture over reimplementing them from scratch. Preserve this project's contracts, authority boundaries, and invariants; do not copy incompatible behavior blindly. When code is copied or materially adapted, retain source/revision/license provenance and record local modifications where required.
+11. Prefer the smallest mechanism that closes a demonstrated failure mode; do not add speculative seams.
