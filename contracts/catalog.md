@@ -21,7 +21,7 @@ Hosts, adapters, and tools may produce candidates or observations and may persis
 | Finding | Reviewer/Verifier/Host candidate | Kernel | unresolved observation with immutable lineage |
 | Release Authorization | Human/policy decision candidate | Kernel | authorized external effect bound to verified snapshot and expected target state |
 | Release Receipt | Release executor observation | Kernel | actual released target/content identity bound to authorization |
-| Receipt | Kernel | Kernel | terminal or checkpoint result over exact lineage |
+| Receipt | Kernel | Kernel | typed `checkpoint` or `terminal` result over exact lineage; only `terminal` establishes terminal run state |
 
 Draft schemas should be introduced only when the corresponding vertical slice is implemented.
 Canonical digest representation and compatibility rules belong to the protocol specification and must be shared by every producer/validator.
