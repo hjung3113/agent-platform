@@ -24,7 +24,8 @@ class CanonicalJsonTests(unittest.TestCase):
         )
         self.assertEqual(
             canonical.content_digest(artifact),
-            "sha256:9ef2d6362d8228ecd6aa78be1d40a609b4b0d170fbae27b0f11963b5d345ec1e",
+            "sha256:agent-platform-json-v1:"
+            "e2842fd7064e25c9bbe073d3b438aff569d4f5eb4447dad6124ca5514325c0a2",
         )
 
     def test_object_insertion_order_does_not_change_identity(self) -> None:
@@ -33,6 +34,12 @@ class CanonicalJsonTests(unittest.TestCase):
 
         self.assertEqual(canonical.canonical_json_bytes(left), canonical.canonical_json_bytes(right))
         self.assertEqual(canonical.content_digest(left), canonical.content_digest(right))
+
+    def test_object_keys_use_utf16_code_unit_order(self) -> None:
+        self.assertEqual(
+            canonical.canonical_json_bytes({"\ue000": 1, "\U0001f600": 2}),
+            '{"😀":2,"\ue000":1}'.encode("utf-8"),
+        )
 
     def test_array_order_changes_identity(self) -> None:
         self.assertNotEqual(
@@ -59,6 +66,28 @@ class CanonicalJsonTests(unittest.TestCase):
     def test_invalid_unicode_fails_closed(self) -> None:
         with self.assertRaises(canonical.CanonicalizationError):
             canonical.content_digest({"bad": "\ud800"})
+
+    def test_cyclic_container_fails_closed(self) -> None:
+        cyclic: list[object] = []
+        cyclic.append(cyclic)
+
+        with self.assertRaisesRegex(canonical.CanonicalizationError, "cyclic"):
+            canonical.content_digest(cyclic)
+
+    def test_shared_container_is_not_treated_as_cycle(self) -> None:
+        shared = {"x": 1}
+        self.assertEqual(
+            canonical.canonical_json_bytes([shared, shared]),
+            b'[{"x":1},{"x":1}]',
+        )
+
+    def test_excessive_nesting_fails_closed(self) -> None:
+        value: object = None
+        for _ in range(canonical.MAX_NESTING_DEPTH + 1):
+            value = [value]
+
+        with self.assertRaisesRegex(canonical.CanonicalizationError, "nesting"):
+            canonical.content_digest(value)
 
 
 if __name__ == "__main__":
