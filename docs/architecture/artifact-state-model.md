@@ -38,9 +38,17 @@ Verification evidence for another subject snapshot is stale by definition.
 - Context Pack and Attempt Packet bind their authoritative source lineage and cannot silently replace sources.
 - Release Authorization binds the verified snapshot plus the expected target state; Release Receipt records the actual released identity.
 
-## Publication authority
-There is one logical authoritative publication boundary.
-Agents, adapters, hosts, and tools may produce candidates or observations, and storage components may persist on behalf of the authority boundary, but they do not independently create competing authoritative records.
+## Publication authority and commit point
+There is one logical authoritative publication boundary: the Kernel.
+Agents, adapters, hosts, and tools may produce candidates or observations, and storage components may persist on behalf of that boundary, but they do not independently create authoritative run-state records.
+
+The immutable transition lineage admitted and published by the Kernel is the sole authoritative operational run state.
+Publication of an immutable transition is the protocol commit point. Projection updates occur after that commit and are recoverable derived work.
+
+## Replay and conflict semantics
+Authoritative transitions must carry enough deterministic ordering and causal/predecessor information to replay the same accepted lineage into the same derived state.
+A stale or conflicting candidate cannot replace or reinterpret already-published lineage; it must be rejected or represented by a new explicit successor transition.
+Duplicate publication of the same logical operation is idempotent and must not create a second authoritative fact.
 
 ## Derived projections
 - active decisions
@@ -51,13 +59,11 @@ Agents, adapters, hosts, and tools may produce candidates or observations, and s
 - dashboards
 
 A projection may be cached but must cite exact immutable source identities/digests and cannot introduce facts absent from authoritative lineage.
+Missing, stale, or conflicting projections are rebuilt from authoritative lineage rather than treated as a competing source of truth.
 
-## Open design choice
-Two strong source patterns conflict:
-1. `thin-agent-harness`: append-only events are authoritative; replay derives current state.
-2. `opencode-orchestrated-agent-workflow`: one atomically replaced `run.json` is authoritative,
-   immutable artifacts surround it.
+## Receipt semantics
+A Receipt is explicitly typed as checkpoint or terminal.
+A checkpoint Receipt records a durable progress/result boundary but does not terminate the run.
+Only a terminal Receipt establishes the terminal run result.
 
-Draft direction: immutable transition lineage is authoritative, with an atomically replaced
-run-head/projection only as a checkpoint/cache. Before implementation, run a crash-consistency
-spike on Windows + Linux filesystems and record ADR.
+This authority decision is fixed by ADR-0007. Concrete durable-write, atomic-replace, fencing/CAS, and filesystem crash-consistency mechanisms remain implementation concerns that require validation on supported platforms.
