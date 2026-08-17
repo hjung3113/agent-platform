@@ -1,39 +1,56 @@
 # Contract Catalog Draft
 
-All authoritative contracts are published through one logical Kernel authority boundary.
+All authoritative records are published through one logical Kernel authority boundary.
 Hosts, adapters, and tools may produce candidates or observations and may persist records on behalf of that boundary, but they are not independent authoritative publishers.
 Canonical repository placement, schema validity, producer role, or verdict text does not confer authority.
 
-| Contract | Writer/Proposer | Authoritative Publisher | Authority / Required Binding |
+## Contract-shape rule
+
+A conceptual contract does **not** automatically require a standalone schema, table/file, service, or lifecycle. Prefer embedding adjacent data while preserving exact identity/digest/provenance bindings. Promote a concept to a standalone contract only when it needs an independent authority gate, asynchronous lifecycle, retention policy, reuse boundary, or external protocol surface.
+
+## Minimum viable contract profile
+
+The first vertical slice uses six standalone record families:
+
+| Contract | Writer/Proposer | Authoritative Publisher | Required Binding |
 |---|---|---|---|
-| Request Contract | Intake/Planner | Kernel after required human alignment | approved objective/scope/AC |
-| Decision Proposal | Human/agent proposal | Kernel after human approval | none until approved |
-| Human Approval Record | Human Authority | Kernel | approval bound to exact decision/effect subject and scope |
-| Decision Record | Human approval | Kernel | durable material decision |
-| Workflow Revision | Planner/Conductor proposal | Kernel after deterministic admission + required human gate | admitted graph/policy; digest must equal checked candidate subject |
-| Plan Check | Plan Checker candidate | Kernel | semantic judgement bound to exact candidate digest; `PASS` is never an admission predicate by itself |
-| Context Pack | Context Compiler candidate | Kernel | immutable selection record bound to exact admitted/published source identities/digests |
-| Attempt Packet | Context Compiler candidate | Kernel | execution contract bound to workflow/task/context/workspace/runtime envelope, required capabilities, and admitted Runtime Capability Profile identity |
-| Role Capability Grant | Policy/Kernel candidate | Kernel/Host | bounded execution capabilities for an exact role/attempt; cannot be widened by the role, adapter defaults, inherited runtime configuration, or native tool mapping |
-| Runtime Capability Profile | Host/runtime adapter observation | Kernel | immutable observed runtime/adapter/configuration/tool-mapping identity plus semantic capability and effective-permission set used for admission |
-| Workspace Snapshot | Host observation | Kernel | exact effective workspace/content identity used by downstream Result/Review/Verify/Release |
-| Runtime Observation | Runtime adapter/Host observation | Kernel | observed runtime fact bound to Attempt, Runtime Capability Profile, and output snapshot; never completion authority |
-| Result | Implementer candidate | Kernel after validation | candidate task result bound to Attempt, Observation, and output snapshot; does not itself advance workflow state |
-| Review | Reviewer candidate | Kernel after validation | semantic judgement over exact Result/snapshot; not transition authority |
-| Evidence | Host/adapter/test tool observation | Kernel | observed fact bound to exact subject snapshot and execution context |
-| Verification | Verifier candidate | Kernel after validation | semantic acceptance judgement bound to exact Result/snapshot and evidence set; not transition authority |
-| Finding | Reviewer/Verifier/Host candidate | Kernel | unresolved observation with immutable lineage |
-| Release Authorization | Human/policy decision candidate | Kernel | separately authorized external effect bound to exact verified snapshot and expected target state |
-| Release Receipt | Release executor observation | Kernel | actual released target/content identity bound to authorization |
-| Receipt | Kernel | Kernel | typed `checkpoint` or `terminal` result over exact lineage after deterministic transition predicates; only `terminal` establishes terminal run state |
+| Request Contract | Human/Planner | Kernel | objective/scope/acceptance criteria and required human alignment |
+| Workflow Revision | Planner | Kernel | admitted task graph/policy and exact Request lineage |
+| Attempt Packet | Kernel/internal context assembly | Kernel | workflow/task, context-source bindings, capability envelope, exact Runtime Capability Profile identity, workspace snapshot identity |
+| Result | Implementer candidate | Kernel after validation | Attempt, exact Runtime Capability Profile, output snapshot, runtime observation/provenance |
+| Verification | independent Verifier candidate | Kernel after validation | exact Result/snapshot plus evidence and blocking findings |
+| Receipt | Kernel | Kernel | exact accepted lineage and deterministic transition outcome; only `terminal` establishes terminal run state |
+
+This is sufficient to prove authority, lineage, execution, independent verification, runtime-capability binding, stale-binding rejection, replay/idempotency, and terminal transition end-to-end.
+
+## Deferred/conditional concepts
+
+| Concept | Default MVP shape | Promote to standalone when... |
+|---|---|---|
+| Decision Proposal | ephemeral candidate | a resumable approval workflow needs it |
+| Human Approval Record | conditional standalone | material scope/policy/external-effect approval is required |
+| Decision Record | conditional standalone | a material decision must remain durable authority |
+| Plan Check | omitted for simple workflow | policy requires independent semantic plan critique |
+| Context Pack | embedded in Attempt Packet | context selection is reused, asynchronous, independently retained, or externally consumed |
+| Role Capability Grant | embedded in Attempt Packet | grants have an independent lifecycle/revocation/protocol surface |
+| Runtime Capability Profile | immutable Host/runtime observation embedded or content-addressed by Attempt | the profile is reused, independently retained/queried, or needs a protocol surface outside the Attempt lifecycle |
+| Workspace Snapshot | embedded identity/binding | snapshots are independently stored/reused/retained |
+| Runtime Observation | embedded in Result | observations stream independently or need separate retention/query semantics |
+| Evidence | embedded/attached to Verification | evidence is asynchronous, shared, large, or independently retained |
+| Review | folded into Verification | semantic quality review must be independently judged from acceptance verification |
+| Finding | embedded in Verification | findings need lifecycle independent of the verification that created them |
+| Release Authorization | omitted | a separately authorized external effect exists |
+| Release Receipt | omitted | an external effect is executed and must be reconciled |
 
 ## Catalog invariants
-- Candidate and admitted/published identities are distinct even when payloads are identical.
+- Candidate, admitted, and published authority states remain distinct even when they are not separately persisted.
 - Kernel admission predicates are deterministic policy checks plus required human approvals; they never reduce to trusting an LLM verdict field.
+- No role may both implement and final-verify the same snapshot.
+- Embedded data must preserve the same exact subject/source identity, digest, provenance, and stale-binding rejection required of a standalone record.
 - External-effect authorization is independent from verification readiness.
 - Capability admission is against an exact Runtime Capability Profile; runtime family names, executable presence, or command acceptance are insufficient.
 - `unsupported`, `unknown`, or `partial` cannot satisfy a required capability unless the Attempt Packet explicitly admits the named degraded mode.
 - A Runtime Capability Profile identity change invalidates prior admission for execution under that changed runtime/configuration.
 
-Draft schemas should be introduced only when the corresponding vertical slice is implemented.
+Additional schemas should be introduced only when the corresponding vertical slice or promotion condition is implemented.
 Canonical digest representation and compatibility rules belong to the protocol specification and must be shared by every producer/validator.
