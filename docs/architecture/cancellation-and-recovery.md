@@ -21,4 +21,6 @@ Per [ADR-0007](../adr/0007-run-state-authority.md), recovery derives semantic st
 - `reconciliation_required` is not retryable success/failure; it blocks conflicting retry, successor, and parallel work until an authoritative reconciliation transition resolves the ambiguity
 - cancellation, runtime failure, retry, repair, replan, blocked, and terminal completion remain distinct transitions
 
+When cancellation races with runtime completion or result publication, accepted observations remain separate immutable facts. The Kernel resolves the next state from their authoritative causal/order lineage; cancellation does not retroactively erase an already-published completion/result fact.
+
 Concrete process fencing, storage primitives, and crash-consistency mechanisms are implementation concerns, but they must preserve these semantic rules on every supported platform.
