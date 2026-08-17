@@ -48,6 +48,9 @@ Per [ADR-0007](../adr/0007-run-state-authority.md), immutable transition lineage
 
 Authoritative transition publication is the protocol commit point. Current-state/run-head documents are derived checkpoints or caches only and cannot introduce facts absent from lineage.
 
+Each transition identifies the exact causal/predecessor lineage it extends. A stale or conflicting candidate cannot replace or reinterpret published lineage; it is rejected or represented as a new explicit successor transition.
+Duplicate publication of the same logical operation is idempotent and cannot create a second authoritative fact.
+
 ## Derived projections
 - active decisions
 - current run status
@@ -59,3 +62,8 @@ Authoritative transition publication is the protocol commit point. Current-state
 A projection may be cached but must cite exact immutable source identities/digests. Missing, stale, corrupt, or conflicting projections are rebuilt or rejected from authoritative lineage.
 
 Replay of the same accepted lineage must produce the same derived state, eligible task set, and transition inputs.
+
+## Receipt semantics
+A Receipt is explicitly typed as checkpoint or terminal.
+A checkpoint Receipt records a durable progress/result boundary but does not terminate the run.
+Only a terminal Receipt establishes terminal run state.
