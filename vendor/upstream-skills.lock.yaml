@@ -1,0 +1,50 @@
+version: 1
+research_date: 2026-08-17
+upstreams:
+  - name: superpowers
+    repo: https://github.com/obra/superpowers
+    license: MIT
+    revision: PIN-BEFORE-IMPORT
+    candidates:
+      - skills/test-driven-development
+      - skills/systematic-debugging
+      - skills/verification-before-completion
+      - skills/using-git-worktrees
+      - skills/requesting-code-review
+      - skills/receiving-code-review
+      - skills/finishing-a-development-branch
+      - skills/writing-skills
+    policy: manual-review-and-eval-before-import-or-update
+
+  - name: mattpocock-skills
+    repo: https://github.com/mattpocock/skills
+    license: MIT
+    revision: PIN-BEFORE-IMPORT
+    candidates:
+      - grilling
+      - grill-with-docs
+      - domain-modeling
+      - codebase-design
+      - diagnosing-bugs
+      - code-review
+      - writing-great-skills
+      - resolving-merge-conflicts
+    policy: manual-review-and-eval-before-import-or-update
+
+  - name: ecc
+    repo: https://github.com/affaan-m/ECC
+    license: MIT
+    revision: PIN-BEFORE-IMPORT
+    candidates:
+      - selective-profile-skills-only
+    policy: concept-first; avoid wholesale catalog import
+
+  - name: gsd
+    repo: https://github.com/gsd-build/get-shit-done
+    license: MIT
+    revision: PIN-FOR-RESEARCH
+    candidates:
+      - goal-backward-plan-checker-concept
+      - namespace-routing-concept
+      - fresh-context-concept
+    policy: adapt concepts; do not vendor workflow system wholesale

@@ -1,0 +1,21 @@
+version: 1
+authorities:
+  product_intent:
+    - docs/product/
+  product_behavior:
+    - docs/specs/
+  architecture_decisions:
+    - docs/adr/
+  machine_contracts:
+    - contracts/
+  vocabulary:
+    - CONTEXT.md
+non_authoritative:
+  research:
+    - docs/research/
+  reviews:
+    - docs/reviews/
+  plans:
+    - docs/plans/
+  derived_memory:
+    - memory/derived/
