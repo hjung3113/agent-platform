@@ -7,7 +7,7 @@ races. Durable authorization consumption belongs to the authoritative Kernel pat
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
 from typing import Iterable
@@ -17,15 +17,6 @@ from kernel.runtime_capability import (
     CapabilityAdmissionError,
     PermissionEnvelope,
     RuntimeCapabilityProfile,
-)
-
-_PERMISSION_FIELDS = (
-    "filesystem",
-    "network",
-    "process",
-    "credentials",
-    "approval_bypass",
-    "external_effects",
 )
 
 
@@ -99,9 +90,8 @@ def _resolve_inside(root: Path, candidate: Path) -> Path | None:
     """Resolve a candidate and return it only when it remains under root."""
 
     try:
-        resolved_root = root.resolve(strict=True)
         resolved_candidate = candidate.resolve(strict=False)
-        resolved_candidate.relative_to(resolved_root)
+        resolved_candidate.relative_to(root)
     except (FileNotFoundError, OSError, RuntimeError, ValueError):
         return None
     return resolved_candidate
@@ -111,21 +101,50 @@ def _runtime_permissions_within_admitted(
     runtime_permissions: PermissionEnvelope,
     admitted_permissions: PermissionEnvelope,
 ) -> bool:
-    for field_name in _PERMISSION_FIELDS:
-        runtime_values = set(getattr(runtime_permissions, field_name))
-        admitted_values = set(getattr(admitted_permissions, field_name))
+    for permission_field in fields(PermissionEnvelope):
+        runtime_values = set(getattr(runtime_permissions, permission_field.name))
+        admitted_values = set(getattr(admitted_permissions, permission_field.name))
         if not runtime_values.issubset(admitted_values):
             return False
     return True
+
+
+def _authorization_is_well_formed(auth: ReleaseAuthorization) -> bool:
+    return (
+        isinstance(auth.authorization_id, str)
+        and bool(auth.authorization_id)
+        and isinstance(auth.subject, str)
+        and bool(auth.subject)
+        and isinstance(auth.effects, tuple)
+        and all(isinstance(effect, str) and effect for effect in auth.effects)
+        and isinstance(auth.target, str)
+        and bool(auth.target)
+        and isinstance(auth.target_precondition, str)
+        and bool(auth.target_precondition)
+        and isinstance(auth.snapshot_digest, str)
+        and bool(auth.snapshot_digest)
+        and isinstance(auth.plan_digest, str)
+        and bool(auth.plan_digest)
+        and isinstance(auth.consumed, bool)
+    )
 
 
 def _authorization_matches(request: AttemptRequest) -> bool:
     auth = request.authorization
     if not request.requested_effects:
         return auth is None
-    if auth is None or auth.consumed:
+    if auth is None or not _authorization_is_well_formed(auth) or auth.consumed:
         return False
-    if not request.effect_target or not request.effect_target_precondition:
+    if not all(
+        isinstance(value, str) and value
+        for value in (
+            request.subject,
+            request.effect_target,
+            request.effect_target_precondition,
+            request.snapshot_digest,
+            request.plan_digest,
+        )
+    ):
         return False
     return (
         auth.subject == request.subject
@@ -144,9 +163,42 @@ def _effects_are_admitted(request: AttemptRequest) -> bool:
     return requested.issubset(set(request.runtime_profile.permission_envelope.external_effects))
 
 
+def _request_shape_is_valid(request: AttemptRequest) -> bool:
+    return (
+        isinstance(request.workspace_root, Path)
+        and isinstance(request.required_capabilities, tuple)
+        and isinstance(request.candidate_paths, tuple)
+        and all(isinstance(candidate, Path) for candidate in request.candidate_paths)
+        and isinstance(request.context, tuple)
+        and all(
+            isinstance(record, ContextRecord)
+            and isinstance(record.source, str)
+            and isinstance(record.text, str)
+            for record in request.context
+        )
+        and isinstance(request.subject, str)
+        and isinstance(request.snapshot_digest, str)
+        and isinstance(request.plan_digest, str)
+        and isinstance(request.requested_effects, tuple)
+        and all(
+            isinstance(effect, str) and effect for effect in request.requested_effects
+        )
+        and isinstance(request.effect_target, str)
+        and isinstance(request.effect_target_precondition, str)
+        and (
+            request.authorization is None
+            or isinstance(request.authorization, ReleaseAuthorization)
+        )
+        and isinstance(request.retain_evidence, bool)
+        and isinstance(request.redaction_status, str)
+    )
+
+
 def admit_attempt(request: AttemptRequest) -> AdmissionResult:
     """Admit a request only when every deterministic policy check passes."""
 
+    if not isinstance(request, AttemptRequest) or not _request_shape_is_valid(request):
+        return _blocked("invalid_attempt_request")
     if not isinstance(request.runtime_profile, RuntimeCapabilityProfile):
         return _blocked("invalid_runtime_capability_profile")
     if not isinstance(request.admitted_permissions, PermissionEnvelope):
@@ -172,7 +224,9 @@ def admit_attempt(request: AttemptRequest) -> AdmissionResult:
 
     try:
         root = request.workspace_root.resolve(strict=True)
-    except (FileNotFoundError, OSError, RuntimeError):
+        if not root.is_dir():
+            return _blocked("workspace_root_not_directory")
+    except (FileNotFoundError, OSError, RuntimeError, ValueError):
         return _blocked("workspace_root_unresolvable")
 
     normalized: list[str] = []
@@ -182,18 +236,21 @@ def admit_attempt(request: AttemptRequest) -> AdmissionResult:
             return _blocked("candidate_path_outside_workspace")
         normalized.append(str(resolved))
 
-    context_digest = content_digest(
-        [{"source": record.source, "text": record.text} for record in request.context]
-    )
-    envelope = EvidenceEnvelope(
-        workspace_root=str(root),
-        candidate_paths=tuple(normalized),
-        runtime_profile_identity=request.runtime_profile.identity,
-        admitted_permission_digest=content_digest(
-            request.admitted_permissions.to_canonical_value()
-        ),
-        context_digest=context_digest,
-    )
+    try:
+        context_digest = content_digest(
+            [{"source": record.source, "text": record.text} for record in request.context]
+        )
+        envelope = EvidenceEnvelope(
+            workspace_root=str(root),
+            candidate_paths=tuple(normalized),
+            runtime_profile_identity=request.runtime_profile.identity,
+            admitted_permission_digest=content_digest(
+                request.admitted_permissions.to_canonical_value()
+            ),
+            context_digest=context_digest,
+        )
+    except (TypeError, ValueError, UnicodeError):
+        return _blocked("evidence_binding_failed")
     return AdmissionResult(AdmissionStatus.ADMITTED, "ok", envelope)
 
 
