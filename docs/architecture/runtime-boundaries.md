@@ -31,6 +31,16 @@ For every canonical action, its contract defines the observable effect, permissi
 
 Runtime-specific features remain explicit extensions. They must not be smuggled into a canonical action or force the canonical vocabulary toward a lowest-common-denominator abstraction. A workflow requiring an extension declares it as a capability requirement and is admitted only to compatible profiles.
 
+## Contract-semantics boundary
+
+Runtime/adapter capability is separate from protocol compatibility.
+
+- canonical artifact interpretation is selected by the artifact's recorded protocol/schema version, never by Runtime Capability Profile, adapter version, or runtime version
+- adapters may translate harness-neutral actions to native operations but cannot silently rename, default, coerce, or reinterpret canonical contract fields
+- an adapter/runtime update must preserve the meaning of every protocol/schema version it claims to support
+- if different contract meaning is required, the change must use a new protocol/schema version or an explicit compatibility/migration rule
+- replay of retained authoritative lineage must use the recorded contract versions and historical compatibility/migration rules rather than whatever adapter/runtime is current at replay time
+
 ## Permission preservation
 
 The effective runtime permission set must be equal to or narrower than the admitted execution envelope after all runtime defaults, inherited configuration, tool aliases, and adapter mappings are resolved. Any mapping that would widen filesystem, network, process, credential, approval-bypass, or external-effect authority fails admission rather than relying on runtime defaults.
@@ -43,4 +53,4 @@ No adapter may silently substitute a different runtime, model, transport, worksp
 
 Runtime or adapter upgrades may change native behavior without changing the canonical protocol. Therefore capability admission and downstream evidence bind the exact Runtime Capability Profile identity, not only a runtime family name. If an upgrade, configuration change, tool mapping change, or probe result changes the profile identity, prior admission is stale and execution must be re-admitted.
 
-Workspace Snapshot identity and Runtime Capability Profile identity are independent bindings: the former fixes effective workspace content/state; the latter fixes execution semantics and permissions.
+Workspace Snapshot identity and Runtime Capability Profile identity are independent bindings: the former fixes effective workspace content/state; the latter fixes execution semantics and permissions. Neither may redefine the canonical meaning selected by an artifact's protocol/schema version.
