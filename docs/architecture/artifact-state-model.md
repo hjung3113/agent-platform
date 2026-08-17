@@ -1,5 +1,17 @@
 # Artifact and Run-State Model
 
+## Authority phases
+A payload moves through distinct authority phases:
+
+`Candidate -> Kernel admission -> Published authoritative record -> Derived projection`
+
+- **Candidate**: proposed content or judgement. It remains non-authoritative even when schema-valid, stored under a canonical path, or produced by a privileged-named role.
+- **Admitted**: the exact candidate identity/digest has passed deterministic Kernel policy checks and every required Human Authority gate.
+- **Published**: the admitted identity has been durably committed through the single Kernel authority boundary.
+- **Derived projection**: a rebuildable view over published lineage; it cannot introduce new authoritative facts.
+
+An LLM verdict such as `PASS` is candidate semantic evidence, never an admission predicate by itself.
+
 ## Immutable lineage
 Authoritative lineage is expressed through immutable artifacts and explicit parent bindings.
 
@@ -33,7 +45,8 @@ Verification evidence for another subject snapshot is stale by definition.
 
 ## Gate binding
 - Plan Check binds the canonical digest of the candidate plan/workflow it checked.
-- Kernel may admit a Workflow Revision only when its canonical content digest equals the passing Plan Check subject digest.
+- A passing Plan Check is required semantic evidence when policy requires it, but does not itself authorize admission.
+- Kernel may admit a Workflow Revision only when its canonical content digest equals the Plan Check subject digest, deterministic admission predicates pass, and any material Human Authority gate is satisfied.
 - Every successor Workflow Revision created by replan requires a new Plan Check over that successor digest.
 - Any transformation that changes canonical content produces a new candidate requiring the applicable gate again.
 - Context Pack and Attempt Packet bind their authoritative source lineage and cannot silently replace sources.
@@ -42,6 +55,7 @@ Verification evidence for another subject snapshot is stale by definition.
 ## Publication authority
 There is one logical authoritative publication boundary: Kernel.
 Agents, adapters, hosts, orchestration helpers, and tools may produce candidates or observations, and storage components may persist on behalf of the authority boundary, but they do not independently create competing authoritative records.
+Canonical repository placement, schema validity, producer role, or verdict text cannot bypass admission.
 
 ## Authoritative run state
 Per [ADR-0007](../adr/0007-run-state-authority.md), immutable transition lineage admitted and published by the Kernel is the sole authoritative operational run state.

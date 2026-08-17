@@ -16,7 +16,7 @@ An admitted Workflow Revision is immutable and binds the complete orchestration 
 
 Admission must reject unknown task references, self-dependencies, structural cycles, ambiguous dependency semantics, missing required policies, and incompatible graph references.
 
-Every Workflow Revision, including one produced by replan, must pass an independent Plan Check bound to that exact canonical revision digest before Kernel admission. A previously passing Plan Check cannot authorize changed canonical workflow content.
+Every Workflow Revision, including one produced by replan, must pass an independent Plan Check bound to that exact canonical revision digest before Kernel admission. A passing Plan Check is required semantic evidence when policy requires it, but never authorizes admission by itself. Kernel must separately apply deterministic admission predicates and require Human Authority approval for material scope/policy changes. A previously passing Plan Check cannot authorize changed canonical workflow content.
 
 ## Deterministic eligibility and next action
 Eligibility is a pure projection of:
@@ -68,8 +68,9 @@ A task/attempt in `reconciliation_required` blocks retry, successor execution, o
 
 ## Authority boundary
 - Conductor and Architect/Planner may propose task splits, risk profile, repair, replan, and candidate Workflow Revisions.
-- Plan Checker independently judges the exact candidate revision before admission.
+- Plan Checker independently judges the exact candidate revision before admission; its verdict is candidate semantic evidence, not publication/admission authority.
 - Deterministic orchestration logic computes eligibility and transition candidates from admitted state; it has no independent publication authority.
+- Human Authority approves material scope/policy changes before dependent admission.
 - Kernel is the sole authority that admits Workflow Revisions and publishes authoritative run transitions.
 
-No model role, runtime adapter, host process, or orchestration helper may bypass Kernel admission by directly publishing workflow state.
+No model role, runtime adapter, host process, or orchestration helper may bypass Kernel admission by directly publishing workflow state, and no `PASS` verdict can substitute for Kernel admission predicates.
