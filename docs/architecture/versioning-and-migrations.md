@@ -9,8 +9,14 @@ Rules already fixed:
 - migrations produce successor records/projections with provenance
 - adapter compatibility is not protocol compatibility
 - runtime update cannot silently change canonical contract meaning
+- artifact identity uses one protocol-defined canonical representation and digest algorithm
+- semantically irrelevant serialization differences must not create implementation-specific identity
+- canonicalization rules cover field ordering/omission, path representation, text/newline normalization where applicable, and which metadata is excluded from content identity
+- the schema/protocol version participating in canonical interpretation is unambiguous and validated before digest comparison
+- producers and validators must compute the same digest for the same canonical artifact
+- mixed-version parent/child handoffs are rejected unless an explicit compatibility or migration rule permits them
 
 Open before v2:
 - whether old runs are replayed by versioned readers or migrated into a new store
 - retention window for old readers
-- mixed-version workflow/attempt compatibility
+- exact mixed-version compatibility matrix once protocol v1/v2 schemas exist
