@@ -10,7 +10,7 @@ Required states/concepts:
 - blocked
 
 ## Recovery authority
-Per [ADR-0007](../adr/0007-run-state-authority.md), recovery derives semantic state from immutable Kernel-published transition lineage. A mutable run-head or runtime process observation cannot override that lineage.
+Per [ADR-0008](../adr/0008-run-state-authority.md), recovery derives semantic state from immutable Kernel-published transition lineage. A mutable run-head or runtime process observation cannot override that lineage.
 
 ## Recovery rules
 - never assume a killed/vanished process completed or failed cleanly

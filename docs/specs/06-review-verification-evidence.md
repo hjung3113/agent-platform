@@ -33,6 +33,12 @@ Judge the exact produced snapshot against approved outcomes using independent, a
 - flaky/retried evidence preserves failed observations and retry policy rather than presenting only the final successful attempt
 - manual evidence records scenario, observation, subject identity, remaining uncertainty, and the human/agent source of the observation
 
+## Evidence admissibility policy
+- an acceptance criterion or verification policy declares the evidence classes it accepts and any minimum trust, independence, environment, or reproduction requirement needed to satisfy that criterion
+- evidence strength is determined by the admitted evidence policy and provenance, not by producer role, prose confidence, or a model's assertion that the evidence is sufficient
+- model inference, self-report, or derived summary cannot satisfy a criterion that requires direct observation, executable test/build output, exact diff, or explicit human evidence unless the policy explicitly permits that evidence class
+- composite verification cannot silently promote weaker evidence into a stronger class; any substitution or degraded evidence mode must be explicitly admitted and remain visible in criterion coverage
+
 ## Finding lineage and closure
 - a Finding has durable identity/fingerprint and cannot disappear merely because a repair attempt or later review omits it
 - repair attempts create successor lineage; they do not mutate away prior Findings
