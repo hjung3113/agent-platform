@@ -7,14 +7,17 @@ Provide one durable, replayable protocol for request/workflow/task/attempt/evide
 - strict versioned schemas at admission
 - Kernel-assigned durable identities for authoritative records
 - immutable artifacts after publication
-- digest-bound references
-- typed rejection for malformed/stale/conflicting candidates
+- protocol-defined canonical content digests
+- explicit parent/source identity and digest bindings for every authoritative handoff
+- typed rejection for malformed/stale/conflicting/mismatched candidates
 - one single-writer authoritative publication boundary: Kernel
 - task and attempt are separate lifecycle concepts
 - runtime observations are facts, not verdicts
 - findings never mutate in place; closure is successor/event lineage
 - summaries/projections are derived and rebuildable
 - runtime state is outside the checkout
+- mixed-version parent/child handoffs fail closed unless an explicit compatibility or migration rule permits them
+- a later artifact cannot silently substitute a different parent/source merely because it is newer or semantically similar
 
 ## Authoritative state model
 The immutable transition lineage admitted and published by the Kernel is the sole authoritative operational run state.
@@ -29,8 +32,9 @@ Authoritative publication of an immutable transition is the protocol commit poin
 - stale/conflicting publication attempts fail closed rather than overwrite newer state
 - duplicate publication attempts are idempotent and cannot create duplicate authoritative facts
 - prepared/staged candidates remain non-authoritative until Kernel publication
+- child artifacts are admissible only against the exact parent/source identities and digests declared by their contract
 
 ## Lifecycle distinctions
 Failure, cancellation, retry, repair, replan, reconciliation, and terminal completion are semantically distinct protocol outcomes/transitions. Process disappearance alone does not imply any terminal state.
 
-See ADR-0007 for the authority decision. Concrete persistence, fencing/CAS, and filesystem crash-consistency mechanisms remain implementation concerns that require validation on supported platforms.
+See ADR-0007 for the authority decision. Concrete persistence, fencing/CAS, canonicalization encoding, and filesystem crash-consistency mechanisms remain implementation concerns that require validation on supported platforms.
