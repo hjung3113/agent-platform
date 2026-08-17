@@ -6,10 +6,43 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Iterable
 
-from kernel.canonical import content_digest
+from kernel.canonical import CANONICAL_FORMAT, DIGEST_ALGORITHM, content_digest
 
 PROFILE_KIND = "runtime-capability-profile"
 PROFILE_VERSION = 1
+_DIGEST_PREFIX = f"{DIGEST_ALGORITHM}:{CANONICAL_FORMAT}:"
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def _require_non_empty_string(field_name: str, value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    if not value:
+        raise ValueError(f"{field_name} must not be empty")
+    return value
+
+
+def _require_versioned_identity(field_name: str, value: object) -> None:
+    identity = _require_non_empty_string(field_name, value)
+    name, separator, revision = identity.partition("@")
+    if not separator or not name or not revision:
+        raise ValueError(f"{field_name} must be version-qualified as name@revision")
+
+
+def _require_content_identity(field_name: str, value: object) -> None:
+    identity = _require_non_empty_string(field_name, value)
+    if not identity.startswith(_DIGEST_PREFIX):
+        raise ValueError(f"{field_name} must be a canonical content digest")
+    digest = identity[len(_DIGEST_PREFIX) :]
+    if len(digest) != 64 or any(character not in _HEX_DIGITS for character in digest):
+        raise ValueError(f"{field_name} must be a canonical content digest")
+
+
+def _utf16_sort_key(value: str) -> bytes:
+    try:
+        return value.encode("utf-16-be")
+    except UnicodeEncodeError as exc:
+        raise ValueError("permission and capability names must be valid Unicode") from exc
 
 
 class CapabilityStatus(str, Enum):
@@ -25,7 +58,7 @@ class CapabilityAdmissionError(ValueError):
 
 @dataclass(frozen=True)
 class PermissionEnvelope:
-    """Effective runtime permissions after defaults, aliases, and mappings."""
+    """Effective permission grants; category values have set semantics."""
 
     filesystem: tuple[str, ...] = ()
     network: tuple[str, ...] = ()
@@ -44,9 +77,15 @@ class PermissionEnvelope:
             "external_effects",
         ):
             values = getattr(self, field_name)
+            if not isinstance(values, tuple):
+                raise TypeError(f"{field_name} permissions must be a tuple of strings")
             if any(not isinstance(value, str) or not value for value in values):
                 raise ValueError(f"{field_name} permissions must be non-empty strings")
-            object.__setattr__(self, field_name, tuple(sorted(set(values))))
+            object.__setattr__(
+                self,
+                field_name,
+                tuple(sorted(set(values), key=_utf16_sort_key)),
+            )
 
     def to_canonical_value(self) -> dict[str, list[str]]:
         return {
@@ -65,8 +104,7 @@ class Capability:
     status: CapabilityStatus
 
     def __post_init__(self) -> None:
-        if not self.name:
-            raise ValueError("capability name must not be empty")
+        _require_non_empty_string("capability name", self.name)
         if not isinstance(self.status, CapabilityStatus):
             raise TypeError("capability status must be a CapabilityStatus")
 
@@ -83,14 +121,10 @@ class RuntimeCapabilityProfile:
     capabilities: tuple[Capability, ...]
 
     def __post_init__(self) -> None:
-        for field_name in (
-            "runtime",
-            "adapter",
-            "config_identity",
-            "tool_mapping_identity",
-        ):
-            if not getattr(self, field_name):
-                raise ValueError(f"{field_name} must not be empty")
+        _require_versioned_identity("runtime", self.runtime)
+        _require_versioned_identity("adapter", self.adapter)
+        _require_content_identity("config_identity", self.config_identity)
+        _require_content_identity("tool_mapping_identity", self.tool_mapping_identity)
 
         if not isinstance(self.permission_envelope, PermissionEnvelope):
             raise TypeError("permission_envelope must be a PermissionEnvelope")
@@ -105,7 +139,7 @@ class RuntimeCapabilityProfile:
         object.__setattr__(
             self,
             "capabilities",
-            tuple(by_name[name] for name in sorted(by_name)),
+            tuple(by_name[name] for name in sorted(by_name, key=_utf16_sort_key)),
         )
 
     def to_canonical_value(self) -> dict[str, object]:
@@ -132,11 +166,17 @@ class RuntimeCapabilityProfile:
     def require(self, required_capabilities: Iterable[str]) -> None:
         """Fail closed unless every required capability is fully supported."""
 
+        if isinstance(required_capabilities, (str, bytes)):
+            raise TypeError("required_capabilities must be an iterable of capability names")
+
+        required_names: set[str] = set()
+        for name in required_capabilities:
+            _require_non_empty_string("required capability name", name)
+            required_names.add(name)
+
         statuses = {capability.name: capability.status for capability in self.capabilities}
         failures: list[str] = []
-        for name in sorted(set(required_capabilities)):
-            if not name:
-                raise ValueError("required capability name must not be empty")
+        for name in sorted(required_names, key=_utf16_sort_key):
             status = statuses.get(name, CapabilityStatus.UNKNOWN)
             if status is not CapabilityStatus.SUPPORTED:
                 failures.append(f"{name}={status.value}")
