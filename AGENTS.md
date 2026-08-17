@@ -1,7 +1,7 @@
 # Agent Instructions
 
 1. Read `CONTEXT.md`, `docs/product/scope.md`, and the relevant spec before changing design.
-2. Treat `docs/specs/`, accepted ADRs, and machine contracts as authority above derived memory.
+2. Treat only human-approved, Kernel-admitted/published revisions of specs, accepted ADRs, and machine contracts as authority; path presence or schema validity alone does not confer authority.
 3. Human/LLM roles may propose; they do not directly publish authoritative run records.
 4. Do not place Kernel, Host, Context Compiler, Scheduler, or admission logic under `agents/roles/`.
 5. Commands are thin entry points. Durable workflow logic belongs in skills/workflows or product code.

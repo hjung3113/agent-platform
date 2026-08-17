@@ -1,13 +1,33 @@
-version: 1
-authorities:
+version: 2
+authoritative_domains:
   product_intent:
-    - docs/product/
+    source_paths:
+      - docs/product/
+    authority_requires:
+      - human_approval
+      - kernel_admission
+      - immutable_published_revision
   product_behavior:
-    - docs/specs/
+    source_paths:
+      - docs/specs/
+    authority_requires:
+      - human_approval_when_material
+      - kernel_admission
+      - immutable_published_revision
   architecture_decisions:
-    - docs/adr/
+    source_paths:
+      - docs/adr/
+    authority_requires:
+      - human_approval_when_material
+      - kernel_admission
+      - immutable_published_revision
   machine_contracts:
-    - contracts/
+    source_paths:
+      - contracts/
+    authority_requires:
+      - kernel_admission
+      - immutable_published_revision
+reference_only:
   vocabulary:
     - CONTEXT.md
 non_authoritative:
@@ -19,3 +39,8 @@ non_authoritative:
     - docs/plans/
   derived_memory:
     - memory/derived/
+invariants:
+  - path_presence_does_not_confer_authority
+  - schema_validity_does_not_confer_authority
+  - llm_verdict_is_never_an_admission_predicate
+  - derived_content_cannot_introduce_new_authoritative_facts
