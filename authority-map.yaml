@@ -23,13 +23,13 @@ authoritative_domains:
       - immutable_published_revision
   machine_contracts:
     source_paths:
-      - ../product/contracts/
+      - product/contracts/
     authority_requires:
       - kernel_admission
       - immutable_published_revision
 reference_only:
   vocabulary:
-    - ../product/CONTEXT.md
+    - product/CONTEXT.md
 non_authoritative:
   research:
     - docs/research/
@@ -38,7 +38,7 @@ non_authoritative:
   plans:
     - docs/plans/
   derived_memory:
-    - ../product/memory/derived/
+    - product/memory/derived/
 invariants:
   - path_presence_does_not_confer_authority
   - schema_validity_does_not_confer_authority
