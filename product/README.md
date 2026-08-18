@@ -13,7 +13,7 @@ docs produced while building it live outside this tree; see the root `AGENTS.md`
 - `CONTEXT.md` — canonical domain vocabulary.
 - `docs/operations/` — deployment/runtime operations.
 - `docs/product/`, `docs/specs/`, `docs/adr/`, `docs/architecture/` — template-only
-  placeholders; no live content here (see `../dev-env/docs/` for the current versions).
+  placeholders; no live content here (see `../docs/` for the current versions).
 - `contracts/` — machine-enforceable contract catalog and future schemas.
 - `agents/` — human/LLM role and skill surfaces only.
 - `src/` — deterministic product subsystems.

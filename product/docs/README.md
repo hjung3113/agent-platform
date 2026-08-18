@@ -12,4 +12,4 @@ might eventually publish alongside it.
 
 All content about *building this platform* — normative specs, accepted ADRs, architecture
 docs, product vision/scope, research, reviews, delivery plans — lives outside the product
-tree in `../../dev-env/docs/`. See the root `AGENTS.md` for that authority map.
+tree in `../../docs/`. See the root `AGENTS.md` for that authority map.
