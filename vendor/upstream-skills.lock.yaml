@@ -19,16 +19,62 @@ upstreams:
   - name: mattpocock-skills
     repo: https://github.com/mattpocock/skills
     license: MIT
-    revision: PIN-BEFORE-IMPORT
-    candidates:
-      - grilling
-      - grill-with-docs
-      - domain-modeling
-      - codebase-design
-      - diagnosing-bugs
-      - code-review
-      - writing-great-skills
-      - resolving-merge-conflicts
+    revision: 9c9f36ccd3995266cd675468af71639c8dde1ec5
+    reviewed_at: 2026-08-18
+    license_notice: vendor/licenses/mattpocock-skills-LICENSE
+    imported:
+      - name: grilling
+        upstream_path: skills/productivity/grilling
+        upstream_tree: 0d40d978f1a588971a11ea7ae85b208e78102dc3
+        local_path: agents/skills/grilling
+        local_tree: 440899ce3ae3dab582da9b04222292dbc4f5700d
+      - name: grill-with-docs
+        upstream_path: skills/engineering/grill-with-docs
+        upstream_tree: eedaf2562c83155115e9c649fa3ecaac2e10e81d
+        local_path: agents/skills/grill-with-docs
+        local_tree: 00f89ccc26a4520db4c18a8526bd31fa7d0a615b
+      - name: domain-modeling
+        upstream_path: skills/engineering/domain-modeling
+        upstream_tree: 05c3244ec75b7548bbc2b635b0624bb9f70369c3
+        local_path: agents/skills/domain-modeling
+        local_tree: e0c639cfbc8c76e7bd3ea8961f6702845a3f4344
+      - name: codebase-design
+        upstream_path: skills/engineering/codebase-design
+        upstream_tree: 20b7cd1dd1fe5b0bd37ba72649f3a29375574b5b
+        local_path: agents/skills/codebase-design
+        local_tree: c162b103c3f04df82245c5406c7532e0e4a227fe
+      - name: diagnosing-bugs
+        upstream_path: skills/engineering/diagnosing-bugs
+        upstream_tree: 8599c0f6e2bfce70b85973d3be6707426bc8e83f
+        local_path: agents/skills/diagnosing-bugs
+        local_tree: 3e6c1ee629e2ca094307aadfa2a6f91cacb305d2
+      - name: code-review
+        upstream_path: skills/engineering/code-review
+        upstream_tree: 5705c0f8d7151ee7b9a74f0f959209ec90060ef1
+        local_path: agents/skills/code-review
+        local_tree: 58bb362853cb310c9b35fbe1d71c177c9ab92c5c
+      - name: writing-for-agents
+        upstream_path: skills/productivity/writing-for-agents
+        upstream_tree: bd9c9c4762db0a9a094fd419316ebd4b0444d06e
+        local_path: agents/skills/writing-for-agents
+        local_tree: d01d13ccc71f3e67bb6cefa3dc501e86a39f6a8e
+        note: successor-to-researched-writing-great-skills
+      - name: resolving-merge-conflicts
+        upstream_path: skills/engineering/resolving-merge-conflicts
+        upstream_tree: 6aa1ed0b40fac0ebea5c0cf6f2addf82c99b6323
+        local_path: agents/skills/resolving-merge-conflicts
+        local_tree: 23493ac547f8d199b2d8b3524a36c59bc5e3c26a
+    omitted_runtime_files:
+      - "**/agents/openai.yaml"
+    local_delta:
+      identity: agent-platform-mattpocock-adapt-v1
+      evidence: docs/research/mattpocock-skill-import-2026-08-18.md
+    eval:
+      identity: mattpocock-import-conformance-v1
+      type: manual-static-workflow-conformance
+      result: pass
+      evidence: docs/research/mattpocock-skill-import-2026-08-18.md
+    rollback_revision: none-first-import
     policy: manual-review-and-eval-before-import-or-update
 
   - name: ecc
