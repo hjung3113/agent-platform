@@ -1,0 +1,18 @@
+{
+  "contract_kind": "request",
+  "protocol_version": 1,
+  "schema_version": 1,
+  "payload": {
+    "objective": "Establish the minimum protocol foundation for agent-platform",
+    "scope": [
+      "docs/specs/03-contracts-protocol-state.md",
+      "product/src/kernel/protocol.py",
+      "product/src/kernel/protocol_v1.py"
+    ],
+    "acceptance_criteria": [
+      "Exact dispatch on contract, protocol, and schema version with no fallback",
+      "Stale or substituted Request bindings fail closed",
+      "Canonical golden bytes and digests remain fixed"
+    ]
+  }
+}
