@@ -17,6 +17,7 @@ from kernel.protocol import (
     ContractKind,
     ProtocolRejectionCode,
     ProtocolRejected,
+    ReaderOutcome,
     RecordRef,
     register_reader,
     read_record_ref,
@@ -142,7 +143,7 @@ def _require_string_sequence(
     return tuple(items)
 
 
-def read_request_v1(payload: Any) -> RequestV1:
+def read_request_v1(payload: Any) -> ReaderOutcome:
     """Strictly read a Request v1 payload or raise ``ProtocolRejected``."""
 
     candidate = _require_object(payload, "request_payload")
@@ -152,8 +153,11 @@ def read_request_v1(payload: Any) -> RequestV1:
     acceptance_criteria = _require_string_sequence(
         candidate["acceptance_criteria"], "request_acceptance_criteria", allow_empty=False
     )
-    return RequestV1(
+    request = RequestV1(
         objective=objective, scope=scope, acceptance_criteria=acceptance_criteria
+    )
+    return ReaderOutcome(
+        value=request, canonical_payload=request.to_canonical_value()
     )
 
 
@@ -169,7 +173,7 @@ def _read_task_v1(payload: Any) -> TaskV1:
     )
 
 
-def read_workflow_revision_v1(payload: Any) -> WorkflowRevisionV1:
+def read_workflow_revision_v1(payload: Any) -> ReaderOutcome:
     """Strictly read a one-task Workflow Revision v1 payload.
 
     Exactly one task exists by construction: the schema has a single ``task``
@@ -189,7 +193,10 @@ def read_workflow_revision_v1(payload: Any) -> WorkflowRevisionV1:
             "workflow_revision_request_kind_not_request",
         )
     task = _read_task_v1(candidate["task"])
-    return WorkflowRevisionV1(request=request, task=task)
+    revision = WorkflowRevisionV1(request=request, task=task)
+    return ReaderOutcome(
+        value=revision, canonical_payload=revision.to_canonical_value()
+    )
 
 
 register_reader(

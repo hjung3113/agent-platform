@@ -146,6 +146,18 @@ class RequestV1Tests(unittest.TestCase):
             request_v1_content_digest(changed),
         )
 
+    def test_parsed_envelope_identity_survives_input_mutation(self) -> None:
+        payload = valid_request_payload()
+        parsed = read_request(payload).value
+        digest_at_parse_time = parsed.envelope.content_digest()
+        payload["scope"].append("docs/plans/active/m1-authoritative-publication.md")
+        payload["objective"] = "Mutated after parse"
+        self.assertEqual(parsed.envelope.content_digest(), digest_at_parse_time)
+        self.assertEqual(
+            parsed.envelope.content_digest(),
+            request_v1_content_digest(parsed.value),
+        )
+
 
 class WorkflowRevisionV1Tests(unittest.TestCase):
     def test_minimal_valid_revision_parses_deterministically(self) -> None:
@@ -272,6 +284,18 @@ class WorkflowRevisionV1Tests(unittest.TestCase):
         )
         self.assertNotEqual(workflow_revision_v1_content_digest(revision), other_digest)
 
+    def test_parsed_envelope_identity_survives_input_mutation(self) -> None:
+        payload = valid_workflow_payload()
+        parsed = read_workflow(payload).value
+        digest_at_parse_time = parsed.envelope.content_digest()
+        payload["task"]["acceptance_criteria"].append("Later mutation")
+        payload["request"]["record_id"] = "rec-request-mutated"
+        self.assertEqual(parsed.envelope.content_digest(), digest_at_parse_time)
+        self.assertEqual(
+            parsed.envelope.content_digest(),
+            workflow_revision_v1_content_digest(parsed.value),
+        )
+
     def test_declared_published_digest_must_equal_recomputed_candidate_digest(self) -> None:
         request = read_request(valid_request_payload()).value.value
         computed = request_v1_content_digest(request)
@@ -282,6 +306,21 @@ class WorkflowRevisionV1Tests(unittest.TestCase):
         }
         self.assertTrue(read_published_record(record).ok)
         record["content_digest"] = "sha256:agent-platform-json-v1:" + "d" * 64
+        self.assertEqual(
+            read_published_record(record).rejection_code,
+            ProtocolRejectionCode.CONTENT_DIGEST_MISMATCH,
+        )
+
+    def test_declared_published_digest_must_equal_recomputed_revision_digest(self) -> None:
+        revision = read_workflow(valid_workflow_payload()).value.value
+        computed = workflow_revision_v1_content_digest(revision)
+        record = {
+            "record_id": "rec-workflow-1",
+            "content_digest": computed,
+            **workflow_envelope(valid_workflow_payload()),
+        }
+        self.assertTrue(read_published_record(record).ok)
+        record["content_digest"] = "sha256:agent-platform-json-v1:" + "e" * 64
         self.assertEqual(
             read_published_record(record).rejection_code,
             ProtocolRejectionCode.CONTENT_DIGEST_MISMATCH,

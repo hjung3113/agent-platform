@@ -7,6 +7,7 @@ from kernel.canonical import content_digest
 from kernel.protocol import (
     ContractKind,
     ProtocolRejectionCode,
+    ReaderOutcome,
     read_candidate,
     read_published_record,
     register_reader,
@@ -44,7 +45,10 @@ class RegistrySandbox(unittest.TestCase):
 class ExactDispatchTests(RegistrySandbox):
     def test_exact_key_dispatch_and_no_fallback(self) -> None:
         register_reader(
-            ContractKind.WORKFLOW_REVISION, 2, 2, lambda payload: {"seen": payload}
+            ContractKind.WORKFLOW_REVISION,
+            2,
+            2,
+            lambda payload: ReaderOutcome(value={"seen": payload}, canonical_payload=payload),
         )
 
         result = read_candidate(
@@ -78,7 +82,12 @@ class ExactDispatchTests(RegistrySandbox):
         )
 
     def test_unknown_contract_kind_rejects(self) -> None:
-        register_reader(ContractKind.WORKFLOW_REVISION, 2, 2, lambda payload: payload)
+        register_reader(
+            ContractKind.WORKFLOW_REVISION,
+            2,
+            2,
+            lambda payload: ReaderOutcome(value=payload, canonical_payload=payload),
+        )
 
         result = read_candidate(candidate_envelope(contract_kind="decision"))
         self.assertEqual(
@@ -87,7 +96,12 @@ class ExactDispatchTests(RegistrySandbox):
         self.assertFalse(result.ok)
 
     def test_unsupported_protocol_version_rejects_without_fallback(self) -> None:
-        register_reader(ContractKind.REQUEST, 1, 1, lambda payload: payload)
+        register_reader(
+            ContractKind.REQUEST,
+            1,
+            1,
+            lambda payload: ReaderOutcome(value=payload, canonical_payload=payload),
+        )
 
         result = read_candidate(candidate_envelope(protocol_version=2))
         self.assertEqual(
@@ -96,7 +110,12 @@ class ExactDispatchTests(RegistrySandbox):
         )
 
     def test_unsupported_schema_version_rejects_without_fallback(self) -> None:
-        register_reader(ContractKind.REQUEST, 1, 1, lambda payload: payload)
+        register_reader(
+            ContractKind.REQUEST,
+            1,
+            1,
+            lambda payload: ReaderOutcome(value=payload, canonical_payload=payload),
+        )
 
         result = read_candidate(candidate_envelope(schema_version=2))
         self.assertEqual(
@@ -160,7 +179,10 @@ class PublishedRecordTests(RegistrySandbox):
     def setUp(self) -> None:
         super().setUp()
         register_reader(
-            ContractKind.WORKFLOW_REVISION, 2, 2, lambda payload: payload
+            ContractKind.WORKFLOW_REVISION,
+            2,
+            2,
+            lambda payload: ReaderOutcome(value=payload, canonical_payload=payload),
         )
 
     def published_record(self, *, declared_digest: str) -> dict:

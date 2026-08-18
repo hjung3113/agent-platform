@@ -12,13 +12,28 @@ is introduced only in M1.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Callable
 
 from kernel.canonical import CANONICAL_FORMAT, DIGEST_ALGORITHM, content_digest
 
-PayloadReader = Callable[[Any], Any]
+
+@dataclass(frozen=True)
+class ReaderOutcome:
+    """Successful payload-reader result.
+
+    ``canonical_payload`` is the payload representation derived from the typed
+    ``value`` itself, never the raw caller input, so a parsed envelope's
+    content identity cannot diverge from its typed value through later
+    mutation of the original input object.
+    """
+
+    value: Any
+    canonical_payload: Any
+
+
+PayloadReader = Callable[[Any], ReaderOutcome]
 
 CANDIDATE_KEYS = frozenset(
     {"contract_kind", "protocol_version", "schema_version", "payload"}
@@ -343,12 +358,22 @@ def _dispatch(parsed: CandidateEnvelope) -> ReadResult:
         )
     reader = _READERS[(parsed.contract_kind, parsed.protocol_version, parsed.schema_version)]
     try:
-        value = reader(parsed.payload)
+        outcome = reader(parsed.payload)
     except ProtocolRejected as rejection:
         return ReadResult(
             value=None, rejection_code=rejection.code, reason=rejection.reason
         )
-    return ReadResult(value=ParsedCandidate(envelope=parsed, value=value), reason="ok")
+    if not isinstance(outcome, ReaderOutcome):
+        raise TypeError(
+            "payload reader for "
+            f"{parsed.contract_kind.value}/{parsed.protocol_version}/"
+            f"{parsed.schema_version} must return ReaderOutcome, "
+            f"got {type(outcome).__name__}"
+        )
+    envelope = replace(parsed, payload=outcome.canonical_payload)
+    return ReadResult(
+        value=ParsedCandidate(envelope=envelope, value=outcome.value), reason="ok"
+    )
 
 
 def read_published_record(record: Any) -> ReadResult:
