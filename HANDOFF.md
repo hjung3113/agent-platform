@@ -17,24 +17,42 @@
 
 ## Next session — fixed scope
 
-Implement the **Minimum Viable Kernel authoritative publication vertical slice** spanning #1, #2, #3, and #25, under the YAGNI constraints from #10.
+Follow Issue #34's milestone order. Implement **M0 — Minimum protocol foundation only** using [`docs/plans/active/m0-minimum-protocol-foundation.md`](docs/plans/active/m0-minimum-protocol-foundation.md) as the detailed implementation plan.
 
-Required scope:
+Required M0 scope:
 
-1. Kernel-only atomic admit/publish path for the MVP record families needed by one-task E2E.
-2. Exact predecessor/parent/content-digest lineage checks at publication.
-3. Stable idempotency identity: same key + same content returns the existing publication; same key + conflicting content fails closed.
-4. Concrete stale-writer fencing/CAS based on expected authoritative predecessor/head identity.
-5. Immutable authoritative transition lineage with derived head/projection that can be discarded and rebuilt.
-6. Deterministic replay from retained lineage.
-7. Golden/replay tests from #25 for digest stability, duplicate publication, stale/conflicting writers, unknown versions, and unsupported mixed-version edges.
-8. One-task E2E skeleton: `Request -> Workflow Revision -> Attempt -> Result -> Verification -> terminal Receipt`, without implementing full orchestration or release machinery.
+1. Strict candidate/published protocol wire shapes without creating publication authority.
+2. Exact `(contract_kind, protocol_version, schema_version)` reader dispatch; no latest-reader fallback.
+3. Protocol-specific typed rejection results.
+4. Exact `contract_kind + record_id + content_digest` Request binding primitive.
+5. Minimal Request v1 and one-task Workflow Revision v1 only.
+6. Strict-key parsing so forged publication metadata/unknown fields fail closed.
+7. Canonical golden vectors and stale/substituted binding negative tests using the existing `src/kernel/canonical.py` implementation.
+8. Existing contract/kernel regression suites remain green.
 
-Do **not** expand the next slice into #4 orchestration, #5 full verification/evidence lifecycle, #6 Context Compiler, or #24 skill supply-chain except for the smallest interfaces strictly required by the Kernel vertical slice.
+Do **not** implement M1 publication/replay or M2 E2E in the M0 slice.
 
-## Known follow-ups after the next slice
+## Deferred until the corresponding gate
+
+### M1 — after M0 passes
+
+- filesystem-backed append-only authoritative lineage outside checkout
+- atomic Kernel admission + publication
+- durable publication identity and idempotency
+- stale-writer/predecessor/head fencing
+- derived projection after commit
+- deterministic replay/fault injection
+
+### M2 — after M1 passes
+
+- Attempt Packet / Result / Verification / terminal Receipt
+- explicit stub Host boundary
+- one-task protocol E2E
+
+### Later milestones
 
 - #7/#8 Host/runtime enforcement: actual process/network/secret isolation, adapter-reported effective profiles, drift-triggered re-admission, and admission-to-use path race closure.
 - #5 verification/evidence soundness after authoritative lineage/snapshot bindings exist.
 - #4 deterministic orchestration after replay/authoritative state is stable.
 - #6 context compilation and #24 skill supply-chain after the core Kernel/runtime boundaries are executable.
+- #9/#25 compatibility registry, historical cross-version rule provenance, retained-lineage replay, and reader/rule retirement reachability remain M7/real-cross-version-edge work except for M0's exact-reader rejection tests.
