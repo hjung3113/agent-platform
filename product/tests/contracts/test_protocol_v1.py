@@ -122,6 +122,20 @@ class RequestV1Tests(unittest.TestCase):
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
         )
 
+    def test_tuple_valued_sequences_reject(self) -> None:
+        payload = valid_request_payload()
+        payload["scope"] = ("docs/plans/active/m0-minimum-protocol-foundation.md",)
+        self.assertEqual(
+            read_request(payload).rejection_code,
+            ProtocolRejectionCode.MALFORMED_PAYLOAD,
+        )
+        payload = valid_request_payload()
+        payload["acceptance_criteria"] = ("All contract tests pass",)
+        self.assertEqual(
+            read_request(payload).rejection_code,
+            ProtocolRejectionCode.MALFORMED_PAYLOAD,
+        )
+
     def test_unknown_payload_fields_reject(self) -> None:
         payload = valid_request_payload()
         payload["runtime_profile"] = "opencode"
@@ -239,6 +253,14 @@ class WorkflowRevisionV1Tests(unittest.TestCase):
     def test_single_task_is_enforced_by_construction(self) -> None:
         payload = valid_workflow_payload()
         payload["tasks"] = [payload["task"], payload["task"]]
+        self.assertEqual(
+            read_workflow(payload).rejection_code,
+            ProtocolRejectionCode.MALFORMED_PAYLOAD,
+        )
+
+    def test_tuple_valued_task_acceptance_criteria_reject(self) -> None:
+        payload = valid_workflow_payload()
+        payload["task"]["acceptance_criteria"] = ("Dispatch is exact",)
         self.assertEqual(
             read_workflow(payload).rejection_code,
             ProtocolRejectionCode.MALFORMED_PAYLOAD,

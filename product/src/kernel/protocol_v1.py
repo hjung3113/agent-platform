@@ -127,7 +127,7 @@ def _require_nonempty_string(value: Any, what: str) -> str:
 def _require_string_sequence(
     value: Any, what: str, *, allow_empty: bool
 ) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)):
+    if not isinstance(value, list):
         raise ProtocolRejected(
             ProtocolRejectionCode.MALFORMED_PAYLOAD, f"{what}_not_sequence"
         )
