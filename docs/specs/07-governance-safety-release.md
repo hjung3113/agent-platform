@@ -19,4 +19,4 @@ Constrain authority, permissions, retries, and external effects.
 - upstream copied assets retain license/attribution
 
 ## Release
-Verified readiness and release authorization are different states. A verification `PASS` cannot create an External Effect Authorization. Release Captain executes only effects explicitly permitted by a valid authorization record and the Host must reject stale, mismatched, ambiguous, or absent authorization.
+Verified readiness and release authorization are different states. A verification `PASS` cannot create a Release Authorization. Release Captain executes only effects explicitly permitted by a valid authorization record and the Host must reject stale, mismatched, ambiguous, or absent authorization.

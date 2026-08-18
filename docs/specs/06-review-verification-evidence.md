@@ -4,7 +4,7 @@
 Judge the exact produced snapshot against approved outcomes using independent, admissible evidence.
 
 ## Verification subject
-- verification binds to a canonical Snapshot Manifest/content identity, not a mutable workspace label or repository HEAD alone
+- verification binds to a canonical Workspace Snapshot/content identity, not a mutable workspace label or repository HEAD alone
 - the snapshot identity covers all outcome-relevant workspace/output content and, when applicable, generated/nested content plus execution-context identities needed to interpret evidence
 - Result, Review, Verification, Evidence, Finding resolution, Receipt, and Release lineage must reference the exact subject snapshot they concern
 - evidence from another snapshot, attempt, input set, or incompatible execution environment is stale unless its evidence contract explicitly proves that reuse is invariant-safe

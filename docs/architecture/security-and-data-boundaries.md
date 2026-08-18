@@ -45,7 +45,7 @@ Role, task, runtime, and adapter configuration may narrow the effective capabili
 ## Authorization records
 - **Human Approval Record** — binds approver, material decision/effect, exact subject identity/digest, and approval scope.
 - **Role Capability Grant** — admitted execution envelope defining the tools, write scope, network scope, secret scope, and other side effects available to one attempt/role.
-- **External Effect Authorization** — separately authorizes a concrete push/PR/merge/deploy/release effect or explicit ordered effect set; verification readiness alone cannot create it.
+- **Release Authorization** — separately authorizes a concrete push/PR/merge/deploy/release effect or explicit ordered effect set; verification readiness alone cannot create it.
 
 Authorization records must be explicit, scope-bounded, non-inferable from model prose, and rejected when stale, mismatched, ambiguous, or broader than the exact requested effect.
 

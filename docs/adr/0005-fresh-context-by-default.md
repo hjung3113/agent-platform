@@ -3,7 +3,7 @@
 Status: Proposed
 
 Decision:
-Executors/reviewers/verifiers start from newly compiled task-specific context rather than inheriting
+Implementers/reviewers/verifiers start from newly compiled task-specific context rather than inheriting
 the conductor session.
 
 Reason:
