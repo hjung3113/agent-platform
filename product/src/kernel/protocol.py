@@ -272,9 +272,17 @@ def register_reader(
     schema_version: int,
     reader: PayloadReader,
 ) -> None:
-    """Register the single exact reader for one dispatch key."""
+    """Register the single exact reader for one dispatch key.
 
-    _READERS[(contract_kind, protocol_version, schema_version)] = reader
+    Each dispatch key admits exactly one reader; registering a second reader
+    for an already-registered key is a programming error and raises
+    ``ValueError`` rather than silently replacing the reader.
+    """
+
+    key = (contract_kind, protocol_version, schema_version)
+    if key in _READERS:
+        raise ValueError(f"reader already registered for dispatch key {key!r}")
+    _READERS[key] = reader
 
 
 def read_candidate(envelope: Any) -> ReadResult:

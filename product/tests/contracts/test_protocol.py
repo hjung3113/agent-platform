@@ -30,16 +30,37 @@ def candidate_envelope(
 
 
 class RegistrySandbox(unittest.TestCase):
-    """Keep reader registrations local to each test."""
+    """Keep reader registrations local to each test.
+
+    The registry is emptied and builtin auto-loading is pinned off for the
+    test duration (a test-only escape path around the duplicate-registration
+    check), so tests register exactly the readers they dispatch to without
+    colliding with the builtin v1 keys; both are restored afterwards.
+    """
 
     def setUp(self) -> None:
-        saved = dict(protocol._READERS)
-        self.addCleanup(self._restore, saved)
+        saved_readers = dict(protocol._READERS)
+        saved_builtin_loaded = protocol._BUILTIN_READERS_LOADED
+        protocol._READERS.clear()
+        protocol._BUILTIN_READERS_LOADED = True
+        self.addCleanup(self._restore, saved_readers, saved_builtin_loaded)
 
     @staticmethod
-    def _restore(saved: dict) -> None:
+    def _restore(saved_readers: dict, saved_builtin_loaded: bool) -> None:
         protocol._READERS.clear()
-        protocol._READERS.update(saved)
+        protocol._READERS.update(saved_readers)
+        protocol._BUILTIN_READERS_LOADED = saved_builtin_loaded
+
+
+class RegisterReaderTests(RegistrySandbox):
+    def test_duplicate_registration_raises_and_keeps_first_reader(self) -> None:
+        def reader(payload: object) -> ReaderOutcome:
+            return ReaderOutcome(value=payload, canonical_payload=payload)
+
+        register_reader(ContractKind.REQUEST, 9, 9, reader)
+        with self.assertRaises(ValueError):
+            register_reader(ContractKind.REQUEST, 9, 9, reader)
+        self.assertIs(protocol._READERS[(ContractKind.REQUEST, 9, 9)], reader)
 
 
 class ExactDispatchTests(RegistrySandbox):
