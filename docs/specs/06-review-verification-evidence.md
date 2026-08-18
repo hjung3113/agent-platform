@@ -14,7 +14,14 @@ Judge the exact produced snapshot against approved outcomes using independent, a
 - an Implementer cannot final-verify its own produced snapshot
 - final verification must have a distinct attempt/execution identity from the producing implementation attempt; switching only the role/profile inside the same execution context does not establish independence
 - implementer result claims are candidate claims, not acceptance evidence unless independently observed or reproduced through an admissible evidence source
-- spec-compliance and code-quality review may be separate sequential review profiles, but neither substitutes for acceptance verification
+- in the baseline profile, one independent Verifier performs both spec/quality review and acceptance/evidence verification for a snapshot
+
+### Reviewer/Verifier split trigger
+- the split exists to prevent confirmation bias: a single judge who already decided output is good tends to read acceptance criteria more loosely
+- whether a Task requires a standalone Reviewer is decided per-Task, not per-Workflow-Revision, by a deterministic risk-tier predicate over the Task's admitted attributes (e.g. external-effect presence, capability-grant scope) — the same risk-tier computation Plan Check admission uses, evaluated at its own independent threshold
+- risk tier is computed by the Kernel from admitted Task attributes at admission time; a Planner/Architect-proposed risk profile is a candidate hint only and cannot itself satisfy or bypass the deterministic predicate
+- when the split is required, Reviewer and Verifier execute with independent, blind attempt/execution identities and run in parallel — neither may see the other's in-progress judgement, since sequential exposure reintroduces the same anchoring risk the split exists to remove
+- a Reviewer finding is a blocking Finding on equal footing with a Verifier finding; it is not advisory and follows the same Finding lineage/closure rules below
 
 ## Acceptance coverage and verdict admissibility
 - goal-backward verification starts from declared acceptance criteria and observable truths

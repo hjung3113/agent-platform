@@ -11,7 +11,7 @@
 | Kernel/Host previously mixed with agent roles | CLOSED | moved to `src/` |
 | Kernel vs orchestration publication boundary ambiguous | CLOSED-DESIGN | orchestration calculates deterministically; Kernel alone admits/publishes authoritative transitions |
 | Context Compiler could become model-authored prompt glue | HIGH | deterministic subsystem + provenance contract |
-| Reviewer vs Verifier overlap | MEDIUM | reviewer=quality/spec findings; verifier=acceptance verdict |
+| Reviewer vs Verifier overlap | CLOSED-DESIGN | Spec 06 now fixes the split trigger (per-Task deterministic risk-tier predicate, Kernel-computed, independent threshold from Plan Check), parallel blind execution when split, and equal-footing blocking findings; see ADR-0009 |
 | Knowledge Curator might gain hidden decision authority | MEDIUM | proposal-only rule |
 | Visual workflow editor could drift from kernel schema | MEDIUM | UI edits candidate contracts only |
 | Upstream skill updates could silently change behavior | CLOSED-DESIGN | Spec 08 requires exact pin/content identity, license/local delta, behavior/eval gate, emitted drift validation, rollback, and forbids automatic promotion |
