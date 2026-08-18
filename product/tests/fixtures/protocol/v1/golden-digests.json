@@ -1,0 +1,10 @@
+{
+  "request": {
+    "canonical_json": "{\"contract_kind\":\"request\",\"payload\":{\"acceptance_criteria\":[\"Exact dispatch on contract, protocol, and schema version with no fallback\",\"Stale or substituted Request bindings fail closed\",\"Canonical golden bytes and digests remain fixed\"],\"objective\":\"Establish the minimum protocol foundation for agent-platform\",\"scope\":[\"docs/specs/03-contracts-protocol-state.md\",\"product/src/kernel/protocol.py\",\"product/src/kernel/protocol_v1.py\"]},\"protocol_version\":1,\"schema_version\":1}",
+    "content_digest": "sha256:agent-platform-json-v1:10433089bff3b518472003861531f9ddf2edceb2da0d6f5d56d96f63f4fe213c"
+  },
+  "workflow_revision": {
+    "canonical_json": "{\"contract_kind\":\"workflow_revision\",\"payload\":{\"request\":{\"content_digest\":\"sha256:agent-platform-json-v1:10433089bff3b518472003861531f9ddf2edceb2da0d6f5d56d96f63f4fe213c\",\"contract_kind\":\"request\",\"record_id\":\"rec-request-0001\"},\"task\":{\"acceptance_criteria\":[\"Every unsupported contract, protocol, or schema combination rejects\",\"Golden canonical bytes and digests stay fixed\"],\"objective\":\"Land the M0 protocol foundation slice\",\"task_id\":\"task-m0-1\"}},\"protocol_version\":1,\"schema_version\":1}",
+    "content_digest": "sha256:agent-platform-json-v1:3bdbe2489c5fce7cf1964fed6668a22556c31afc6057419b725ec46273bfbdc2"
+  }
+}
