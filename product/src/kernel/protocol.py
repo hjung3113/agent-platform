@@ -237,6 +237,19 @@ class PublishedRecord:
 
 _READERS: dict[tuple[ContractKind, int, int], PayloadReader] = {}
 
+_BUILTIN_READERS_LOADED = False
+
+
+def _load_builtin_readers() -> None:
+    """Import the version-specific protocol modules so their readers register."""
+
+    global _BUILTIN_READERS_LOADED
+    if _BUILTIN_READERS_LOADED:
+        return
+    from kernel import protocol_v1  # noqa: F401  registers exact v1 readers
+
+    _BUILTIN_READERS_LOADED = True
+
 
 def register_reader(
     contract_kind: ContractKind,
@@ -257,6 +270,7 @@ def read_candidate(envelope: Any) -> ReadResult:
     compatibility lookup.
     """
 
+    _load_builtin_readers()
     if not isinstance(envelope, dict):
         return _reject(ProtocolRejectionCode.MALFORMED_ENVELOPE, "envelope_not_object")
     keys = set(envelope)
