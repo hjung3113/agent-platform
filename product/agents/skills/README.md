@@ -35,7 +35,7 @@ Every managed skill has enough metadata to make routing, portability, context co
 
 Skill metadata supports routing and validation but never grants publication, external-effect, filesystem, network, or secret authority by itself. Those capabilities remain admitted per Attempt/Host policy.
 
-Upstream candidates are recorded in `docs/research/direct-reuse-candidates.md`
+Upstream candidates are recorded in `../../../dev-env/docs/research/direct-reuse-candidates.md`
 and `vendor/upstream-skills.lock.yaml`.
 
 ## Installed Matt Pocock engineering skills
@@ -53,4 +53,4 @@ The following project-level canonical skills are adapted from `mattpocock/skills
 
 These are canonical runtime-neutral sources. Upstream runtime-specific files such as `agents/openai.yaml` are intentionally not imported; runtime emits must be generated/validated through this project's adapter/profile machinery. Project `AGENTS.md`, specs, ADRs, and authority/security contracts override any conflicting upstream workflow instruction.
 
-Import selection, exclusions, local adaptations, and conformance evidence are recorded in `docs/research/mattpocock-skill-import-2026-08-18.md`.
+Import selection, exclusions, local adaptations, and conformance evidence are recorded in `../../../dev-env/docs/research/mattpocock-skill-import-2026-08-18.md`.
