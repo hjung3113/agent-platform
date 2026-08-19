@@ -1,8 +1,10 @@
 # Code-review invariant checked (grep, not unit-tested): no test in the
-# kernel/contract suites writes record content directly into a run directory
+# kernel/contract suites authors record content directly into a run directory
 # outside publish()/lineage_store.RunHandle primitives; the only direct writes
-# targeting a run dir are deliberate _head.json corruption (a derived,
-# rebuildable projection) in test_lineage_store.py and test_replay.py.
+# targeting a run dir are deliberate corruption — of the derived, rebuildable
+# _head.json projection (test_lineage_store.py, test_replay.py) and of
+# committed record files, made to prove readers fail closed
+# (test_publish.py, test_replay.py).
 
 from __future__ import annotations
 
@@ -13,7 +15,12 @@ from pathlib import Path
 
 from kernel.lineage_store import HeadProjection, open_run
 from kernel.protocol import ParsedCandidate, RecordRef, read_candidate
-from kernel.publish import Published, publish
+from kernel.publish import (
+    Published,
+    PublishRejectionCode,
+    Rejected,
+    publish,
+)
 from kernel.replay import RunState, replay
 
 
@@ -186,6 +193,145 @@ class FaultInjectionTests(unittest.TestCase):
                 last_record=committed,
             ),
         )
+
+    def test_publish_self_heals_stale_head_after_crash_between_records(
+        self,
+    ) -> None:
+        genesis = publish(self.state, None, dispatch_request(), None, "key-1")
+        self.assertIsInstance(genesis, Published)
+
+        with self.assertRaises(RuntimeError):
+            publish(
+                self.state,
+                genesis.run_id,
+                dispatch_workflow(genesis.record_ref),
+                genesis.record_ref,
+                "key-2",
+                commit_barrier=simulated_crash,
+            )
+
+        run = open_run(self.state, genesis.run_id)
+        stale = run.read_head()
+        self.assertIsNotNone(stale)
+        self.assertEqual(stale.last_sequence, 1)
+        self.assertTrue((run.run_dir / "0000000002.json").is_file())
+
+        # Recover the true predecessor from the committed records, not from
+        # the stale projection, and prove publish() accepts it at sequence 3.
+        recovered = replay(self.state, genesis.run_id)
+        self.assertEqual(recovered.last_sequence, 2)
+        third = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_workflow(genesis.record_ref, task_id="task-3"),
+            recovered.last_record_id,
+            "key-3",
+        )
+        self.assertIsInstance(third, Published)
+        self.assertEqual(third.record_ref.record_id, f"{genesis.run_id}:0000000003")
+
+        healed = run.read_head()
+        self.assertEqual(healed.last_sequence, 3)
+        self.assertEqual(healed.last_record_file, "0000000003.json")
+        self.assertEqual(healed.last_record["record_id"], third.record_ref.record_id)
+
+    def test_publish_self_heals_forged_valid_json_head(self) -> None:
+        genesis = publish(self.state, None, dispatch_request(), None, "key-1")
+        self.assertIsInstance(genesis, Published)
+        child = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_workflow(genesis.record_ref),
+            genesis.record_ref,
+            "key-2",
+        )
+        self.assertIsInstance(child, Published)
+
+        run = open_run(self.state, genesis.run_id)
+        first_envelope = json.loads(
+            (run.run_dir / "0000000001.json").read_bytes().decode("utf-8")
+        )
+        # Syntactically valid, semantically stale/forged: claims sequence 1
+        # is the head although sequence 2 is committed.
+        forged = {
+            "last_sequence": 1,
+            "last_record_file": "0000000001.json",
+            "last_record": first_envelope,
+        }
+        (run.run_dir / "_head.json").write_text(
+            json.dumps(forged), encoding="utf-8"
+        )
+        self.assertEqual(run.read_head().last_sequence, 1)
+
+        # Even an idempotent shortcut must repair the projection first.
+        retry = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_workflow(genesis.record_ref),
+            child.record_ref,
+            "key-2",
+        )
+        self.assertIsInstance(retry, Published)
+        self.assertEqual(retry, child)
+
+        healed = run.read_head()
+        self.assertEqual(healed.last_sequence, 2)
+        self.assertEqual(healed.last_record_file, "0000000002.json")
+        self.assertEqual(healed.last_record["record_id"], child.record_ref.record_id)
+
+    def test_genesis_retry_after_lost_response_recovers_original_run(self) -> None:
+        request = dispatch_request()
+        with self.assertRaises(RuntimeError):
+            publish(
+                self.state,
+                None,
+                request,
+                None,
+                "key-lost",
+                commit_barrier=simulated_crash,
+            )
+
+        # The caller never learned the generated run_id; retry genesis with
+        # run_id=None, the same idempotency key, and the same content.
+        recovered = publish(self.state, None, request, None, "key-lost")
+        self.assertIsInstance(recovered, Published)
+
+        actual = sole_run_id(self.state)
+        self.assertEqual(recovered.run_id, actual)
+        self.assertEqual(recovered.record_ref.record_id, f"{actual}:0000000001")
+        self.assertEqual(
+            recovered.record_ref.content_digest,
+            request.envelope.content_digest(),
+        )
+        state = replay(self.state, actual)
+        self.assertEqual(state.last_sequence, 1)
+        self.assertEqual(state.request, request.value)
+
+    def test_lost_genesis_retry_with_different_content_rejects(self) -> None:
+        with self.assertRaises(RuntimeError):
+            publish(
+                self.state,
+                None,
+                dispatch_request(objective="Objective A"),
+                None,
+                "key-lost",
+                commit_barrier=simulated_crash,
+            )
+
+        result = publish(
+            self.state,
+            None,
+            dispatch_request(objective="Objective B"),
+            None,
+            "key-lost",
+        )
+        self.assertIsInstance(result, Rejected)
+        self.assertEqual(
+            result.code,
+            PublishRejectionCode.IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_CONTENT,
+        )
+        # No second run was created by the rejected retry.
+        sole_run_id(self.state)
 
 
 if __name__ == "__main__":

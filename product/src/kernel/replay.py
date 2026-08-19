@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
+from kernel.canonical import content_digest
 from kernel.protocol import RecordRef, read_candidate
 from kernel.protocol_v1 import RequestV1, WorkflowRevisionV1
 
@@ -65,6 +66,12 @@ def replay(state_dir: str, run_id: str) -> RunState:
     "no publications yet" state and returns the empty ``RunState`` rather
     than raising; the run directory is never created as a side effect.
 
+    A committed record whose envelope metadata does not verify — a content
+    digest that does not match the recomputed digest of its ``candidate``,
+    a ``record_id``/``run_id``/``sequence`` that disagrees with the
+    deterministic publication scheme, or a gap in the committed sequence —
+    is an integrity fault and fails closed with ``ValueError``.
+
     A committed record whose candidate no longer parses through the current
     protocol dispatch is an integrity fault, not a "no publications yet"
     state, and fails closed with ``ValueError``.
@@ -89,8 +96,33 @@ def replay(state_dir: str, run_id: str) -> RunState:
             last_record_id=last_record_id,
         )
 
+    expected_sequence = 0
     for sequence, envelope in _committed_envelopes(run_dir):
-        result = read_candidate(envelope.get("candidate"))
+        expected_sequence += 1
+        if sequence != expected_sequence:
+            raise ValueError(
+                f"committed record sequence gap in run {run_id}: expected"
+                f" {expected_sequence:010d}, found {sequence:010d}"
+            )
+        candidate = envelope.get("candidate")
+        if envelope.get("content_digest") != content_digest(candidate):
+            raise ValueError(
+                f"committed record {run_id}/{sequence:010d} content digest"
+                " mismatch"
+            )
+        if envelope.get("record_id") != f"{run_id}:{sequence:010d}":
+            raise ValueError(
+                f"committed record {run_id}/{sequence:010d} record_id mismatch"
+            )
+        if envelope.get("run_id") != run_id:
+            raise ValueError(
+                f"committed record {run_id}/{sequence:010d} run_id mismatch"
+            )
+        if envelope.get("sequence") != sequence:
+            raise ValueError(
+                f"committed record {run_id}/{sequence:010d} sequence mismatch"
+            )
+        result = read_candidate(candidate)
         if not result.ok:
             raise ValueError(
                 f"committed record {run_id}/{sequence:010d} failed protocol"

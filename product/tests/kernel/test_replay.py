@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,8 @@ from kernel.lineage_store import open_run
 from kernel.protocol import ParsedCandidate, RecordRef, read_candidate
 from kernel.publish import Published, publish
 from kernel.replay import RunState, replay
+
+OTHER_DIGEST = "sha256:agent-platform-json-v1:" + "f" * 64
 
 
 def dispatch_request(
@@ -126,6 +129,63 @@ class ReplayTests(unittest.TestCase):
             request=None, workflow_revision=None, last_sequence=0, last_record_id=None
         )
         self.assertEqual(replay(self.state, "empty-run"), expected)
+
+    def test_forged_envelope_metadata_fails_closed(self) -> None:
+        genesis, child = self.publish_two_record_run()
+        record_path = (
+            Path(self.state) / "runs" / genesis.run_id / "0000000002.json"
+        )
+        original = record_path.read_bytes()
+
+        forgeries = [
+            ("content_digest", OTHER_DIGEST),
+            ("record_id", f"{genesis.run_id}:0000000009"),
+            ("run_id", "0000000000000000000000000000000f"),
+            ("sequence", 99),
+        ]
+        for field, forged_value in forgeries:
+            with self.subTest(field=field):
+                envelope = json.loads(original.decode("utf-8"))
+                envelope[field] = forged_value
+                record_path.write_text(
+                    json.dumps(envelope), encoding="utf-8"
+                )
+                with self.assertRaises(ValueError):
+                    replay(self.state, genesis.run_id)
+                record_path.write_bytes(original)
+
+        self.assertEqual(replay(self.state, genesis.run_id).last_record_id, child.record_ref)
+
+    def test_sequence_gap_fails_closed(self) -> None:
+        genesis = publish(self.state, None, dispatch_request(), None, "key-1")
+        self.assertIsInstance(genesis, Published)
+        child = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_workflow(genesis.record_ref),
+            genesis.record_ref,
+            "key-2",
+        )
+        self.assertIsInstance(child, Published)
+        third = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_workflow(genesis.record_ref, task_id="task-3"),
+            child.record_ref,
+            "key-3",
+        )
+        self.assertIsInstance(third, Published)
+
+        run_dir = Path(self.state) / "runs" / genesis.run_id
+        for missing in ("0000000002.json", "0000000001.json"):
+            with self.subTest(missing=missing):
+                backup = (run_dir / missing).read_bytes()
+                (run_dir / missing).unlink()
+                with self.assertRaises(ValueError):
+                    replay(self.state, genesis.run_id)
+                (run_dir / missing).write_bytes(backup)
+
+        self.assertEqual(replay(self.state, genesis.run_id).last_sequence, 3)
 
 
 if __name__ == "__main__":

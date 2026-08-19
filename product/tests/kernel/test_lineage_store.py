@@ -10,6 +10,7 @@ from unittest import mock
 
 from kernel.lineage_store import (
     HeadProjection,
+    LockTimeoutError,
     SequenceConflictError,
     open_run,
 )
@@ -101,6 +102,39 @@ class LineageStoreTests(unittest.TestCase):
             self.assertEqual(sorted(used), list(range(1, 9)))
             for seq in range(1, 9):
                 self.assertTrue((run.run_dir / f"{seq:010d}.json").exists())
+
+    def test_lock_timeout_raises_when_held_past_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = open_run(directory, "run-1")
+            acquired = threading.Event()
+            release = threading.Event()
+
+            def hold_lock() -> None:
+                with run.lock():
+                    acquired.set()
+                    self.assertTrue(release.wait(timeout=10))
+
+            holder = threading.Thread(target=hold_lock)
+            holder.start()
+            self.assertTrue(acquired.wait(timeout=10))
+            try:
+                with self.assertRaises(LockTimeoutError):
+                    with run.lock(timeout=0.2):
+                        pass
+            finally:
+                release.set()
+                holder.join(timeout=10)
+            self.assertFalse(holder.is_alive())
+
+            with run.lock(timeout=1.0):
+                pass
+
+    def test_lock_with_timeout_acquires_free_lock_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = open_run(directory, "run-1")
+            with run.lock(timeout=1.0):
+                run.append(1, record_bytes(1))
+            self.assertTrue((run.run_dir / "0000000001.json").exists())
 
     def test_open_run_creates_missing_run_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

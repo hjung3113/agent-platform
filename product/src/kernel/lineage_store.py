@@ -7,10 +7,12 @@ and publication semantics belong to callers holding the run lock.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
 import re
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,10 +21,15 @@ from typing import Iterator
 _SEQUENCE_FILENAME = re.compile(r"^(\d{10})\.json$")
 _HEAD_FILENAME = "_head.json"
 _LOCK_FILENAME = "_lock"
+_LOCK_RETRY_INTERVAL_SECONDS = 0.01
 
 
 class SequenceConflictError(Exception):
     """Raised when appending a sequence number that already exists on disk."""
+
+
+class LockTimeoutError(Exception):
+    """Raised when the run lock cannot be acquired within the given timeout."""
 
 
 @dataclass(frozen=True)
@@ -138,13 +145,36 @@ class RunHandle:
         )
 
     @contextmanager
-    def lock(self) -> Iterator[None]:
-        """Hold the run's exclusive advisory lock for a critical section."""
+    def lock(self, timeout: float | None = None) -> Iterator[None]:
+        """Hold the run's exclusive advisory lock for a critical section.
+
+        ``timeout=None`` (the default) blocks until the lock is acquired.
+        A finite ``timeout`` poll-acquires non-blocking and raises
+        ``LockTimeoutError`` once it elapses without acquisition.
+        """
 
         lock_path = self.run_dir / _LOCK_FILENAME
         lock_file = open(lock_path, "a+b")
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            if timeout is None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            else:
+                deadline = time.monotonic() + timeout
+                while True:
+                    try:
+                        fcntl.flock(
+                            lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
+                        )
+                        break
+                    except OSError as error:
+                        if error.errno not in (errno.EACCES, errno.EAGAIN):
+                            raise
+                        if time.monotonic() >= deadline:
+                            raise LockTimeoutError(
+                                "run lock not acquired within "
+                                f"{timeout}s: {lock_path}"
+                            ) from error
+                        time.sleep(_LOCK_RETRY_INTERVAL_SECONDS)
             try:
                 yield
             finally:
