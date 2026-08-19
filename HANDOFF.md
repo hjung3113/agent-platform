@@ -2,57 +2,77 @@
 
 ## Completed in this slice
 
-- Integrated the fail-closed Attempt admission seam with the `RuntimeCapabilityProfile` primitive already on `main`.
-- Removed the duplicate simplified capability model from the superseded PR #30 design.
-- Admission now binds the exact runtime profile identity, rejects unsupported/partial/unknown required capabilities, and rejects runtime effective permissions that exceed the Attempt's admitted `PermissionEnvelope`.
-- External effects require both an effective runtime grant and an exact authorization binding for ordered effects, target, target precondition, snapshot, and plan.
-- Workspace containment, observed-context isolation, and fail-closed pre-retention redaction checks remain in the bounded seam.
-- Durable authorization consumption and admission-to-use filesystem race closure are intentionally not claimed by this pure policy boundary.
+- M1 — Kernel authoritative publication and replay spine, 4 PRs per
+  [`docs/plans/active/m1-kernel-authoritative-publication.md`](docs/plans/active/m1-kernel-authoritative-publication.md):
+  1. `product/src/kernel/lineage_store.py` — run-scoped append-only filesystem primitive:
+     atomic temp-file+rename commit, duplicate-sequence rejection, `fcntl`-locked run
+     critical section, `_head.json` projection with scan-based rebuild.
+  2. `product/src/kernel/publish.py` — single production writer boundary. Idempotency scan
+     (same key+digest short-circuits to the prior `Published`; differing digest rejects)
+     runs before predecessor fencing, so a retry survives the head advancing underneath it.
+     Typed `PublishRejectionCode` distinct from M0's `ProtocolRejectionCode`.
+  3. `product/src/kernel/replay.py` — pure reducer over raw committed records (never
+     `_head.json`), re-dispatched through M0's real `read_candidate`. Fault-injection tests
+     use `publish()`'s `commit_barrier` seam to prove the commit-before-projection-update
+     ordering invariant: a crash between durable commit and head write leaves the record
+     recoverable via `replay()` / `rebuild_head_from_scan()`.
+  4. `product/tests/kernel/test_m1_integration.py` — end-to-end golden fixtures: genesis
+     Request → child WorkflowRevision through the real dispatch → publish → replay chain,
+     golden envelope shape, content-digest determinism, stale-predecessor rejection.
+- M1 exit gate satisfied: idempotency replay/conflict, stale/conflicting predecessor
+  fencing, commit-before-projection fault recovery, projection loss/corruption cannot
+  change authority, `publish()` is the only writer, all M0 regression suites remain green.
+- Implementation dispatched to `zai-coding-plan/glm-5.3` (low effort for PR1/PR4, high
+  effort for PR2/PR3); each PR independently reviewed and test-verified before commit.
 
-## Validation
+## Validation (M1)
 
-- `PYTHONPATH=src python -m unittest discover -s tests/contracts -p 'test_*.py' -v` — 20 passed.
-- `PYTHONPATH=src python -m unittest discover -s tests/kernel -p 'test_*.py' -v` — 9 passed.
-- `python -m compileall -q src tests` — passed.
+- `PYTHONPATH=product/src python3.12 -m unittest discover -s product/tests/kernel -p 'test_*.py' -v` — 41 passed.
+- `PYTHONPATH=product/src python3.12 -m unittest discover -s product/tests/contracts -p 'test_*.py' -v` — 78 passed.
+- `python3.12 -m compileall -q product/src product/tests` — passed.
+- Note: system `python3` on this machine is 3.9 and lacks `StrEnum` (used by
+  `protocol.py`/`admission.py`/`publish.py`); use `python3.12`+ for this repo.
 
 ## Next session — fixed scope
 
-Follow Issue #34's milestone order. Implement **M0 — Minimum protocol foundation only** using [`docs/plans/active/m0-minimum-protocol-foundation.md`](docs/plans/active/m0-minimum-protocol-foundation.md) as the detailed implementation plan.
+Follow Issue #34's milestone order. Implement **M2 — Attempt/Result/Verification/Receipt**
+next. M1 is a closed prerequisite: do not reopen `lineage_store.py` / `publish.py` /
+`replay.py` semantics without a design-doc update first.
 
-Required M0 scope:
+Required M2 scope (per HANDOFF's prior deferral list, to be detailed in a new
+`docs/plans/active/m2-*.md` before implementation):
 
-1. Strict candidate/published protocol wire shapes without creating publication authority.
-2. Exact `(contract_kind, protocol_version, schema_version)` reader dispatch; no latest-reader fallback.
-3. Protocol-specific typed rejection results.
-4. Exact `contract_kind + record_id + content_digest` Request binding primitive.
-5. Minimal Request v1 and one-task Workflow Revision v1 only.
-6. Strict-key parsing so forged publication metadata/unknown fields fail closed.
-7. Canonical golden vectors and stale/substituted binding negative tests using the existing `src/kernel/canonical.py` implementation.
-8. Existing contract/kernel regression suites remain green.
-
-Do **not** implement M1 publication/replay or M2 E2E in the M0 slice.
+1. Attempt Packet representation and admission wiring onto the M1 publish boundary.
+2. Explicit stub Host boundary (no real process/network/secret isolation yet — that is
+   #7/#8, later).
+3. Result / minimal Evidence / Verification representation.
+4. Independent Verifier execution identity.
+5. Terminal Receipt.
+6. One-task protocol E2E through the full Request → WorkflowRevision → Attempt → Result →
+   Verification → Receipt chain.
 
 ## Deferred until the corresponding gate
 
-### M1 — after M0 passes
+### M7 / real cross-version edge or platform validation
 
-- filesystem-backed append-only authoritative lineage outside checkout
-- atomic Kernel admission + publication
-- durable publication identity and idempotency
-- stale-writer/predecessor/head fencing
-- derived projection after commit
-- deterministic replay/fault injection
+- cross-platform (Windows/Linux) crash-consistency validation of the M1 store
+- compatibility registry, historical cross-version rule provenance, retained-lineage replay
+- reader/rule retirement reachability
 
-### M2 — after M1 passes
+### Only if a concrete need appears later
 
-- Attempt Packet / Result / Verification / terminal Receipt
-- explicit stub Host boundary
-- one-task protocol E2E
+- separate idempotency index (current directory-scan dedupe is bounded by M1's small
+  per-run record count)
+- storage-backend abstraction beyond the concrete filesystem implementation
+- cross-machine locking/leases for multi-process publication across machines
 
-### Later milestones
+### Later milestones (unchanged from M0 handoff)
 
-- #7/#8 Host/runtime enforcement: actual process/network/secret isolation, adapter-reported effective profiles, drift-triggered re-admission, and admission-to-use path race closure.
+- #7/#8 Host/runtime enforcement: actual process/network/secret isolation, adapter-reported
+  effective profiles, drift-triggered re-admission, admission-to-use path race closure.
 - #5 verification/evidence soundness after authoritative lineage/snapshot bindings exist.
 - #4 deterministic orchestration after replay/authoritative state is stable.
-- #6 context compilation and #24 skill supply-chain after the core Kernel/runtime boundaries are executable.
-- #9/#25 compatibility registry, historical cross-version rule provenance, retained-lineage replay, and reader/rule retirement reachability remain M7/real-cross-version-edge work except for M0's exact-reader rejection tests.
+- #6 context compilation and #24 skill supply-chain after core Kernel/runtime boundaries
+  are executable.
+- #9/#25 compatibility registry, historical cross-version rule provenance, retained-lineage
+  replay, and reader/rule retirement reachability remain M7/real-cross-version-edge work.
