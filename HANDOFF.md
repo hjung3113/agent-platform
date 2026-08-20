@@ -1,149 +1,128 @@
 # Handoff
 
-## Completed in this slice (M2 planning)
+## Completed in this slice (M2 implementation)
 
-- M2 — One-task protocol E2E (Attempt/Result/Verification/Receipt) implementation plan
-  written and merged: [`docs/plans/active/m2-one-task-protocol-e2e.md`](docs/plans/active/m2-one-task-protocol-e2e.md),
-  PR #42.
-- Grilled the design with the user (design tree, 4 rounds) after a codex (`gpt-5.6-luna
-  max`, via `orca terminal`) research pass over the M2-relevant specs/ADRs/roadmap and the
-  current M1 kernel implementation. Key decisions locked into the plan doc:
-  - 4 new `ContractKind`s (`attempt_packet`, `result`, `verification`, `receipt`), each
-    independently published/fenced through M1's existing `publish()`/`lineage_store.py`
-    mechanism — Runtime Observation is embedded in `result`'s payload, not a 5th kind.
-  - `publish.py`'s hardcoded 2-step state check generalizes to a linear
-    `head-kind -> next-kind` transition table (request→workflow_revision→attempt_packet→
-    result→verification→receipt), each kind one-per-run, no branching/retry.
-  - Verification `verdict` is a **total function** of `coverage`
-    (PASS iff all SATISFIED > BLOCKED iff any BLOCKED > else FAIL), reader-enforced.
-  - Each `SATISFIED` coverage entry carries an `evidence_digest` bound to the Result's
-    `output_snapshot_digest`, checked at the (lineage-aware) publish boundary — closes a
-    "PASS from assertion alone" gap a reviewer found.
-  - `coverage`-vs-`acceptance_criteria` and Result/Attempt/Verification cross-record
-    bindings are publish-level checks; payload-local self-consistency (e.g.
-    `result.observation` digest match) is reader-level — this reader/publish split was a
-    real defect in the first draft (two independent reviewers caught it) and is now
-    explicit in the plan.
-  - `ReceiptV1` carries `receipt_type: "terminal"` (spec 03's checkpoint/terminal
-    discriminator) instead of inferring terminality from record presence.
-  - stub Host lives in `product/src/execution/` (already scaffolded), stub Verifier in
-    `product/src/verification/` (already scaffolded) — no new top-level module.
-  - **Deliberately deferred, not a gap**: self-verification is closed by plain
-    `verifier_identity != implementer_identity` string inequality, not real
-    execution-provenance-independent identity — that's issue #34's M5 bullet
-    ("execution-provenance independence"), documented in the plan as an explicit
-    non-goal so it doesn't read as an oversight later.
-  - Plan doc §8 breaks implementation into 5 independently-reviewable PRs (protocol
-    readers → publish state machine → replay extension → stub Host/Verifier →
-    end-to-end integration); §9 has the full exit gate.
-- Adversarial review (user's own pass + automated codex review) on the first plan draft
-  found 3 P1s (unconstructible stub APIs, reader doing a lineage-aware check it can't
-  perform, undefined verdict totality) + evidence-binding and receipt-typing gaps; all
-  fixed in the plan before merge (see PR #42 commit history for the full before/after).
+- M2 — Attempt/Result/Verification/Receipt one-task protocol E2E implemented and merged
+  per [`docs/plans/active/m2-one-task-protocol-e2e.md`](docs/plans/active/m2-one-task-protocol-e2e.md),
+  PR #43. 5 commits (protocol readers → publish state machine → replay extension → stub
+  Host/Verifier → e2e integration), each independently reviewable, plus one post-review
+  fix commit.
+- Implementation dispatched via `orca` worktrees to `opencode`/`zai-coding-plan/glm-5.3`
+  (effort `high` for protocol readers, publish state machine, and e2e integration; effort
+  `low` for replay extension and stub Host/Verifier), tracked as an `orca orchestration`
+  task DAG (`run_30bc5e66c6a0`). PR4 (stub Host/Verifier) ran in a separate parallel
+  worktree since it only depends on PR1, then was cherry-picked into the integration
+  branch once PR1 landed.
+- Real design defect caught and fixed mid-implementation, not just at PR review: PR2's
+  first pass special-cased a second Workflow Revision publishing at a Workflow Revision
+  head, to avoid touching 3 pre-existing M1 tests that happened to use a second Workflow
+  Revision as chain filler. That directly violated plan §2's "one record of each kind per
+  run, no branching." Rejected on review; fixed by updating the affected M1 tests
+  (`test_publish.py`, `test_replay.py`, `test_fault_injection.py`, `test_m1_integration.py`)
+  to fill the same chain slots with an Attempt Packet — the actual valid next kind — instead
+  of weakening the state machine. `publish.py`'s `_NEXT_KIND` table has no self-loop on any
+  kind.
+- Two more real defects caught by GitHub PR review (Codex + human adversarial pass) after
+  merge-readiness, fixed in a follow-up commit before merging:
+  1. `read_verification_v1` accepted a `PASS` verdict with non-empty `findings`, letting a
+     self-contradictory authoritative Verification (and a terminal Receipt built on it)
+     exist. Plan §3 defines findings as "non-empty only when verdict != PASS"; the reader
+     recomputed verdict from coverage but never checked this side of the invariant. Now
+     rejects `MALFORMED_PAYLOAD`.
+  2. `Result.output_snapshot_digest` (and the embedded Observation's copy) was validated as
+     merely a non-empty string, not content-digest-shaped, while Verification's `SATISFIED`
+     `evidence_digest` is required to be both content-digest-shaped *and* equal to it. A
+     Result with a non-digest-shaped identity could publish successfully but could never
+     receive a `PASS` Verification — an authoritative dead-end reachable at the protocol
+     layer alone. Both fields now require `is_content_digest()`.
+  - A third PR-review finding (an M1 run with multiple Workflow Revisions crashing instead
+    of migrating cleanly on `publish.py`'s stricter lookup) was **not** actioned: M2 has no
+    persisted production state to migrate. Compatibility registry / historical
+    cross-version rule provenance is explicit M7 scope per the plan doc's own deferred
+    section (§10). Revisit only if a concrete cross-version migration need appears before
+    M7.
+- Design decisions from the M2 plan doc held without needing rework during implementation:
+  4 new `ContractKind`s each independently published/fenced through M1's `publish()`
+  mechanism; `verdict` as a reader-enforced total function of `coverage`; the
+  reader/publish split for payload-local vs. lineage-aware checks; evidence binding via
+  `evidence_digest == Result.output_snapshot_digest`; `ReceiptV1.receipt_type == "terminal"`
+  literal; every stub builder taking the published `RecordRef`, never the candidate payload
+  object (plan §6's explicitly-called-out defect, correctly avoided by the implementer on
+  the first pass).
+
+## Validation (M2, post-merge)
+
+```
+PYTHONPATH=product/src python3.12 -m unittest discover -s product/tests/contracts -p 'test_*.py' -v   # 133 passed
+PYTHONPATH=product/src python3.12 -m unittest discover -s product/tests/kernel -p 'test_*.py' -v       # 78 passed
+PYTHONPATH=product/src python3.12 -m unittest discover -s product/tests/execution -p 'test_*.py' -v    # 11 passed
+PYTHONPATH=product/src python3.12 -m unittest discover -s product/tests/verification -p 'test_*.py' -v # 5 passed
+python3.12 -m compileall -q product/src product/tests                                                  # passed
+```
+
+227 tests total, all green. M0/M1 suites unmodified in semantics (only the 4 test files
+noted above changed, to swap a filler Workflow Revision for a filler Attempt Packet).
+
+M2 exit gate (plan doc §9) self-checked bullet-by-bullet against the combined PR1-PR5 test
+suites during PR5's implementation; see PR #43 description for the per-bullet test mapping.
 
 ## Completed earlier (M1)
 
 - M1 — Kernel authoritative publication and replay spine, 4 PRs per
-  [`docs/plans/active/m1-kernel-authoritative-publication.md`](docs/plans/active/m1-kernel-authoritative-publication.md):
-  1. `product/src/kernel/lineage_store.py` — run-scoped append-only filesystem primitive:
-     atomic temp-file+rename commit, duplicate-sequence rejection, `fcntl`-locked run
-     critical section, `_head.json` projection with scan-based rebuild.
-  2. `product/src/kernel/publish.py` — single production writer boundary. Idempotency scan
-     (same key+digest short-circuits to the prior `Published`; differing digest rejects)
-     runs before predecessor fencing, so a retry survives the head advancing underneath it.
-     Typed `PublishRejectionCode` distinct from M0's `ProtocolRejectionCode`.
-  3. `product/src/kernel/replay.py` — pure reducer over raw committed records (never
-     `_head.json`), re-dispatched through M0's real `read_candidate`. Fault-injection tests
-     use `publish()`'s `commit_barrier` seam to prove the commit-before-projection-update
-     ordering invariant: a crash between durable commit and head write leaves the record
-     recoverable via `replay()` / `rebuild_head_from_scan()`.
-  4. `product/tests/kernel/test_m1_integration.py` — end-to-end golden fixtures: genesis
-     Request → child WorkflowRevision through the real dispatch → publish → replay chain,
-     golden envelope shape, content-digest determinism, stale-predecessor rejection.
-- M1 exit gate satisfied: idempotency replay/conflict, stale/conflicting predecessor
-  fencing, commit-before-projection fault recovery, projection loss/corruption cannot
-  change authority, `publish()` is the only writer, all M0 regression suites remain green.
-- Implementation dispatched to `zai-coding-plan/glm-5.3` (low effort for PR1/PR4, high
-  effort for PR2/PR3); each PR independently reviewed and test-verified before commit.
-- Merged as PR #41. An adversarial review pass on the PR raised 7 findings; 6 judged real
-  defects and fixed before merge, 1 judged out of M1 scope:
-  1. `publish()` no longer trusts `_head.json` blindly — the authoritative head is
-     re-derived from a scan of committed records on every call, inside the lock, and a
-     missing/corrupt/stale projection is repaired before any admission decision.
-  2. `publish()` now enforces the state machine: genesis accepts only a Request candidate,
-     non-genesis accepts only a WorkflowRevision, and a WorkflowRevision's embedded
-     `request` binding is verified against the run's actual genesis Request via
-     `protocol.verify_binding`, not merely structural validity. New
-     `PublishRejectionCode.INVALID_CANDIDATE_KIND_FOR_RUN_STATE` /
-     `.GENESIS_REQUEST_BINDING_MISMATCH`.
-  3. Genesis idempotency now recovers across a lost-response crash window: before minting
-     a new run_id, `publish()` peeks at each existing run's sequence-1 record for the
-     idempotency_key, so a retry with `run_id=None` after a commit-but-unreturned genesis
-     publish finds the original run.
-  4. `replay()` recomputes each committed record's content digest and cross-checks
-     `record_id`/`run_id`/`sequence` against the deterministic scheme, and enforces
-     sequence contiguity — fails closed on any mismatch instead of trusting envelope
-     metadata. `publish()`'s committed-record scan no longer silently skips
-     unreadable/malformed records; it raises.
-  5. Caller-supplied `run_id` is validated against the exact 32-hex-char `uuid4().hex`
-     format `publish()` itself generates, before any filesystem access — closes a
-     path-traversal opening.
-  7. `lineage_store.RunHandle.lock()` gained a poll-acquire `timeout`; `publish()` now
-     actually returns `LOCK_CONTENTION_TIMEOUT` instead of declaring an unreachable code.
-  - **Not fixed, deliberately**: directory-fsync-after-rename durability (real power-loss
-    crash consistency). M1's fault injection proves commit-before-projection *ordering*
-    via the `commit_barrier` seam, not real OS/power-crash durability — that's explicit
-    M7 scope per the plan doc; revisit there if a concrete need appears sooner.
-
-## Validation (M1, post-hardening)
-
-- `PYTHONPATH=product/src python3.12 -m unittest discover -s product/tests/kernel -p 'test_*.py' -v` — 56 passed.
-- `PYTHONPATH=product/src python3.12 -m unittest discover -s product/tests/contracts -p 'test_*.py' -v` — 78 passed.
-- `python3.12 -m compileall -q product/src product/tests` — passed.
-- Note: system `python3` on this machine is 3.9 and lacks `StrEnum` (used by
-  `protocol.py`/`admission.py`/`publish.py`); use `python3.12`+ for this repo.
+  [`docs/plans/active/m1-kernel-authoritative-publication.md`](docs/plans/active/m1-kernel-authoritative-publication.md).
+  Merged as PR #41; adversarial review pass fixed 6 findings before merge (fail-closed head
+  re-derivation, state-machine enforcement, genesis idempotency recovery across crash,
+  fault-closed replay integrity checks, run_id format validation, lock timeout). See prior
+  handoff commits for full detail if needed — not reproduced here to keep this file current
+  rather than cumulative.
 
 ## Next session — fixed scope
 
-**Implement M2** per the merged plan doc:
-[`docs/plans/active/m2-one-task-protocol-e2e.md`](docs/plans/active/m2-one-task-protocol-e2e.md)
-(PR #42). The design is closed — do not re-derive schemas/state-machine/rejection codes
-from the specs again; read the plan doc first, it already answers those questions and
-records why. Only reopen it if implementation surfaces a real contradiction with the
-governing specs/ADRs (update the plan doc, or escalate to the specs, before coding around
-it).
+**Plan M3** per [`mvp-implementation-roadmap.md`](docs/plans/active/mvp-implementation-roadmap.md)
+line 204 ("M3 — Real Host/security boundary and first runtime adapter"), then implement it.
+No M3 plan doc exists yet — start there, following the same process M1/M2 used (design
+review with the user, adversarial pass on the plan draft before locking it, then dispatch
+implementation).
 
-Follow the plan's §8 order, 5 independently-reviewable PRs:
+M3 replaces the fake execution boundary M2 proved wiring for with one real enforceable
+runtime path, without generalizing portability yet:
 
-1. Protocol extension — `protocol.py` new `ContractKind`s, `protocol_v1.py`
-   `AttemptPacketV1`/`ResultV1`/`VerificationV1`/`ReceiptV1` readers. Golden + negative
-   reader tests only.
-2. Kernel publish state-machine generalization — `publish.py` transition table, new
-   `PublishRejectionCode`s (`RUN_ALREADY_TERMINAL`, `ATTEMPT_TASK_BINDING_MISMATCH`,
-   `RESULT_ATTEMPT_BINDING_MISMATCH`, `VERIFICATION_RESULT_BINDING_MISMATCH`,
-   `VERIFICATION_COVERAGE_MISMATCH`, `SELF_VERIFICATION_REJECTED`,
-   `RECEIPT_VERIFICATION_NOT_PASSED`), per-kind binding checks, verdict-gated Receipt
-   admission.
-3. Replay extension — `replay.py` six-field `RunState`, `terminal` property keyed off
-   `receipt_type == "terminal"`.
-4. Stub Host + stub Verifier — `product/src/execution/attempt.py` +
-   `product/src/execution/stub_host.py`, `product/src/verification/stub_verifier.py`.
-   Builder signatures take the published `RecordRef` from `publish()`, not payload objects
-   (see plan §6 — this was a real defect caught in review, don't reintroduce it).
-5. End-to-end integration — wire stub Host/Verifier through `publish()`;
-   `test_m2_integration.py` golden PASS and FAIL fixtures.
+- effective Workspace Snapshot identity (tracked/staged/unstaged/untracked/generated/nested
+  state as outcome-relevant)
+- resolved workspace containment and escape rejection (traversal/symlink/equivalent)
+- Runtime Capability Profile bound to Attempt admission and execution, not just admission
+- effective permission-envelope comparison after native/default/inherited config resolution
+  — inherited/default permissions must not widen the admitted envelope
+- deny-first filesystem/network/process/credential/external-effect enforcement where the
+  runtime can enforce it; no silent runtime/transport/tool fallback
+- real Runtime Observation and exact output snapshot provenance (replacing M2's
+  `stub_execute`, which derives `output_snapshot_digest` as a pure function of the Attempt
+  Packet's digest — no real execution)
+- pre-retention redaction/sensitivity gate sufficient for retained runtime output/evidence
+- deterministic adapter conformance fixtures independent of model/network availability;
+  live runtime smoke tests supplemental only
 
-M1 is a closed prerequisite: do not reopen `lineage_store.py`'s or `replay.py`'s M1-proven
-invariants (atomic append, predecessor fencing, idempotency, commit-before-projection
-ordering). `publish.py`'s state-machine check is the one M1 piece M2 *does* extend, per
-plan §4 — that's expected, not a regression risk, as long as the M1 exit-gate behaviors
-(genesis/Request-only, WorkflowRevision binding, idempotency, fault-injection ordering)
-stay intact under the new transition table.
+**Default first runtime: OpenCode.** Additional runtimes stay deferred to M8.
 
-Exit gate for checking M2 in Issue #34: plan doc §9 (full chain golden fixture,
-stale-binding/self-verification/missing-evidence/duplicate-terminal all fail closed,
-FAIL/BLOCKED Verification publishes but produces no Receipt, all M0/M1 suites green, no
-M3+ scope creep).
+**Non-goals for M3:** all runtimes, general plugin system, release automation,
+sophisticated secret-classification taxonomy, real evidence policy (M5), Context Compiler
+(M4), DAG/retry/repair/replan (M6).
+
+**Exit evidence to design toward:** traversal/symlink/equivalent escape cases fail closed;
+unsupported/partial/unknown required capability cannot execute without an explicitly
+admitted degraded mode; runtime/config/tool-mapping drift changes profile identity and
+invalidates stale admission; inherited/default permissions cannot widen the admitted
+envelope; runtime exit/stdout cannot directly establish completion; retained canary secret
+fixtures do not persist raw secret material.
+
+Primary issues: #7, #8.
+
+M2's stub Host/Verifier (`product/src/execution/stub_host.py`,
+`product/src/verification/stub_verifier.py`) are M3's replacement targets, not code to
+extend in place — M3 should design the real Host boundary against
+`product/agents/roles/implementer.md`'s actual requirements, then decide how much of the
+stub's shape (function signatures, RecordRef-in/typed-payload-out pattern) survives versus
+gets replaced outright.
 
 ## Deferred until the corresponding gate
 
@@ -151,6 +130,8 @@ M3+ scope creep).
 
 - cross-platform (Windows/Linux) crash-consistency validation of the M1 store
 - compatibility registry, historical cross-version rule provenance, retained-lineage replay
+  (includes the M2-PR-review finding about multi-Workflow-Revision legacy runs — no action
+  needed until this gate is concrete)
 - reader/rule retirement reachability
 
 ### Only if a concrete need appears later
@@ -160,13 +141,15 @@ M3+ scope creep).
 - storage-backend abstraction beyond the concrete filesystem implementation
 - cross-machine locking/leases for multi-process publication across machines
 
-### Later milestones (unchanged from M0 handoff)
+### Later milestones (unchanged from M0/M1 handoff)
 
-- #7/#8 Host/runtime enforcement: actual process/network/secret isolation, adapter-reported
-  effective profiles, drift-triggered re-admission, admission-to-use path race closure.
-- #5 verification/evidence soundness after authoritative lineage/snapshot bindings exist.
-- #4 deterministic orchestration after replay/authoritative state is stable.
-- #6 context compilation and #24 skill supply-chain after core Kernel/runtime boundaries
-  are executable.
+- #5 verification/evidence soundness after authoritative lineage/snapshot bindings exist
+  (M5 — hardened criterion/evidence policy, execution-provenance independence,
+  self-verification closed by real distinct identity rather than M2's string inequality).
+- #4 deterministic orchestration after replay/authoritative state is stable (M6 — retry/
+  repair/replan, fan-in, safe parallelism, multi-task DAG, Reviewer/Verifier split per
+  ADR-0009).
+- #6 context compilation (M4) and #24 skill supply-chain (M9) after core Kernel/runtime
+  boundaries are executable.
 - #9/#25 compatibility registry, historical cross-version rule provenance, retained-lineage
   replay, and reader/rule retirement reachability remain M7/real-cross-version-edge work.
