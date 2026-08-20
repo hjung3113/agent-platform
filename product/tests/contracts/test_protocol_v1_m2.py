@@ -373,6 +373,15 @@ class ResultV1Tests(unittest.TestCase):
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
         )
 
+    def test_output_snapshot_digest_not_content_digest_shaped_rejects(self) -> None:
+        payload = valid_result_payload()
+        payload["output_snapshot_digest"] = "not-a-digest"
+        payload["observation"]["output_snapshot_digest"] = "not-a-digest"
+        self.assertEqual(
+            read_result(payload).rejection_code,
+            ProtocolRejectionCode.MALFORMED_PAYLOAD,
+        )
+
     def test_parent_kind_other_than_attempt_packet_rejects(self) -> None:
         payload = valid_result_payload()
         payload["attempt"]["contract_kind"] = "workflow_revision"
@@ -569,6 +578,14 @@ class VerificationV1Tests(unittest.TestCase):
         unproven_mix["findings"] = ["Digest mismatch", "No evidence observed"]
         self.assertTrue(
             read_verification(unproven_mix).ok, read_verification(unproven_mix).reason
+        )
+
+    def test_findings_nonempty_with_pass_verdict_rejects(self) -> None:
+        payload = valid_verification_payload()
+        payload["findings"] = ["should not be here on a PASS verdict"]
+        self.assertEqual(
+            read_verification(payload).rejection_code,
+            ProtocolRejectionCode.MALFORMED_PAYLOAD,
         )
 
     def test_empty_or_non_string_findings_reject(self) -> None:

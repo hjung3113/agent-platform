@@ -300,6 +300,14 @@ def _require_nonempty_string(value: Any, what: str) -> str:
     return value
 
 
+def _require_content_digest(value: Any, what: str) -> str:
+    if not is_content_digest(value):
+        raise ProtocolRejected(
+            ProtocolRejectionCode.MALFORMED_PAYLOAD, f"{what}_malformed"
+        )
+    return value
+
+
 def _require_string_sequence(
     value: Any, what: str, *, allow_empty: bool
 ) -> tuple[str, ...]:
@@ -428,7 +436,7 @@ def _read_observation_v1(payload: Any) -> RuntimeObservationV1:
         runtime_identity=_require_nonempty_string(
             observation["runtime_identity"], "observation_runtime_identity"
         ),
-        output_snapshot_digest=_require_nonempty_string(
+        output_snapshot_digest=_require_content_digest(
             observation["output_snapshot_digest"],
             "observation_output_snapshot_digest",
         ),
@@ -454,7 +462,7 @@ def read_result_v1(payload: Any) -> ReaderOutcome:
             ProtocolRejectionCode.BINDING_MISMATCH,
             "result_attempt_kind_not_attempt_packet",
         )
-    output_snapshot_digest = _require_nonempty_string(
+    output_snapshot_digest = _require_content_digest(
         candidate["output_snapshot_digest"], "result_output_snapshot_digest"
     )
     observation = _read_observation_v1(candidate["observation"])
@@ -559,6 +567,14 @@ def read_verification_v1(payload: Any) -> ReaderOutcome:
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
             f"verification_verdict_mismatch_declared={verdict}_computed={computed}",
         )
+    findings = _require_string_sequence(
+        candidate["findings"], "verification_findings", allow_empty=True
+    )
+    if verdict == "PASS" and findings:
+        raise ProtocolRejected(
+            ProtocolRejectionCode.MALFORMED_PAYLOAD,
+            "verification_findings_nonempty_for_pass_verdict",
+        )
     verification = VerificationV1(
         result=result,
         verifier_identity=_require_nonempty_string(
@@ -566,9 +582,7 @@ def read_verification_v1(payload: Any) -> ReaderOutcome:
         ),
         coverage=coverage,
         verdict=verdict,
-        findings=_require_string_sequence(
-            candidate["findings"], "verification_findings", allow_empty=True
-        ),
+        findings=findings,
     )
     return ReaderOutcome(
         value=verification, canonical_payload=verification.to_canonical_value()
