@@ -95,6 +95,16 @@ def _find_nested_repositories(root: Path) -> list[Path]:
 
 
 def _nested_repository_entries(root: Path, nested_paths: Sequence[Path]) -> list[dict[str, object]]:
+    """Bind each nested repository to its own full effective snapshot identity.
+
+    A nested repo's commit id alone hides staged/unstaged/untracked/further-
+    nested dirty state within it (a real gap flagged in PR review): the
+    runtime can consume or modify that content while the outer digest stays
+    unchanged. Recursing through ``snapshot_identity`` on the nested root
+    captures its complete effective state the same way the outer call does,
+    bounded by the finite nesting depth of the real worktree tree.
+    """
+
     entries: list[dict[str, object]] = []
     for nested_path in nested_paths:
         try:
@@ -107,17 +117,12 @@ def _nested_repository_entries(root: Path, nested_paths: Sequence[Path]) -> list
         if inside_worktree.strip() != "true":
             raise ValueError(f"nested path is not a git worktree: {nested_path}")
 
-        try:
-            commit = _run_git(
-                ("-C", str(nested_path), "rev-parse", "HEAD"), cwd=root
-            ).strip()
-        except subprocess.CalledProcessError:
-            commit = None
-
+        nested_snapshot = snapshot_identity(nested_path)
         entries.append(
             {
                 "path": nested_path.relative_to(root).as_posix(),
-                "commit": commit or None,
+                "commit": nested_snapshot.head_commit,
+                "effective_digest": nested_snapshot.digest,
             }
         )
     return entries
@@ -175,6 +180,33 @@ def _untracked_entries(root: Path, nested_paths: Sequence[Path]) -> list[dict[st
     return entries
 
 
+def _generated_path_entries(
+    root: Path, declared_generated_paths: tuple[str, ...]
+) -> list[dict[str, str]]:
+    """Hash each declared generated path's actual state, not just its name.
+
+    A declared path is frequently Git-ignored (build output), so its content
+    is otherwise absent from staged/unstaged/untracked state entirely: a real
+    gap flagged in PR review where creating/deleting/changing the artifact
+    left the digest unchanged. Each entry records existence/type/content (or
+    link target) so distinct artifact states cannot share one digest.
+    """
+
+    entries: list[dict[str, str]] = []
+    for relative_name in sorted(declared_generated_paths):
+        path = root / relative_name
+        if os.path.islink(path):
+            state = "symlink:" + _untracked_content_or_link(path)
+        elif path.is_dir():
+            state = "dir"
+        elif path.is_file():
+            state = "file:" + _untracked_content_or_link(path)
+        else:
+            state = "absent"
+        entries.append({"path": relative_name, "state": state})
+    return entries
+
+
 def snapshot_identity(
     root: Path, declared_generated_paths: tuple[str, ...] = ()
 ) -> WorkspaceSnapshot:
@@ -197,6 +229,8 @@ def snapshot_identity(
         ),
         unstaged_digest=content_digest(_run_git(("diff",), cwd=resolved_root)),
         untracked_digest=content_digest(untracked_entries),
-        generated_digest=content_digest(list(sorted(declared_generated_paths))),
+        generated_digest=content_digest(
+            _generated_path_entries(resolved_root, declared_generated_paths)
+        ),
         nested_repo_digest=content_digest(nested_entries),
     )

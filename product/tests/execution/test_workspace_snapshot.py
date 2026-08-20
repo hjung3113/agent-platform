@@ -118,7 +118,48 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(first.untracked_digest, different.untracked_digest)
         self.assertNotEqual(first.digest, different.digest)
 
-    def test_uncommitted_change_inside_nested_repo_does_not_change_outer_snapshot(self) -> None:
+    def test_generated_path_content_change_changes_digest(self) -> None:
+        """PR-review fix: generated_digest must hash content, not only names.
+
+        A declared generated path is often Git-ignored; before this fix,
+        only the path name was hashed, so creating/editing/deleting the
+        actual artifact never changed the digest — distinct Result content
+        could share one identity. Ignore the path via .gitignore so it never
+        enters staged/unstaged/untracked state and only generated_digest can
+        observe it.
+        """
+
+        (self.root / ".gitignore").write_text("generated/\n", encoding="utf-8")
+        self._git(self.root, "add", ".gitignore")
+        self._git(self.root, "commit", "-m", "ignore generated/")
+        generated_dir = self.root / "generated"
+        generated_dir.mkdir()
+        declared = ("generated/output.bin",)
+
+        absent = snapshot_identity(self.root, declared)
+        (generated_dir / "output.bin").write_bytes(b"first artifact bytes")
+        first_content = snapshot_identity(self.root, declared)
+        (generated_dir / "output.bin").write_bytes(b"different artifact bytes")
+        second_content = snapshot_identity(self.root, declared)
+
+        self.assertNotEqual(absent.generated_digest, first_content.generated_digest)
+        self.assertNotEqual(first_content.generated_digest, second_content.generated_digest)
+        self.assertNotEqual(absent.digest, first_content.digest)
+        self.assertNotEqual(first_content.digest, second_content.digest)
+        # Ignored, so staged/unstaged/untracked never see the artifact at all.
+        self.assertEqual(absent.untracked_digest, second_content.untracked_digest)
+
+    def test_uncommitted_change_inside_nested_repo_changes_outer_snapshot(self) -> None:
+        """PR-review fix: a nested repo's dirty state must be visible outside.
+
+        An earlier version bound only the nested repo's commit id, so an
+        uncommitted change inside it never changed the outer digest — the
+        runtime could consume different nested content across two snapshots
+        that claimed the same identity. Nested identity now recurses through
+        the nested repo's own full ``snapshot_identity``, so its dirty state
+        is bound transitively.
+        """
+
         nested = self.root / "nested"
         self._init_repo(nested)
         nested_file = nested / "inner.txt"
@@ -130,9 +171,17 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         nested_file.write_text("nested uncommitted\n", encoding="utf-8")
         after = snapshot_identity(self.root)
 
-        self.assertEqual(before.nested_repo_digest, after.nested_repo_digest)
-        self.assertEqual(before.digest, after.digest)
+        self.assertNotEqual(before.nested_repo_digest, after.nested_repo_digest)
+        self.assertNotEqual(before.digest, after.digest)
         self.assertNotEqual(before.nested_repo_digest, content_digest([]))
+
+        # Committing the same change back to committed state (same content,
+        # re-committed) restores an equal nested identity, since it is the
+        # nested repo's own snapshot digest, not merely "dirty vs. clean".
+        self._git(nested, "add", "inner.txt")
+        self._git(nested, "commit", "-m", "nested fixture update")
+        after_commit = snapshot_identity(self.root)
+        self.assertNotEqual(before.nested_repo_digest, after_commit.nested_repo_digest)
 
 
 if __name__ == "__main__":
