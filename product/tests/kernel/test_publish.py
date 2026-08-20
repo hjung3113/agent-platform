@@ -65,6 +65,30 @@ def dispatch_workflow(
     return result.value
 
 
+def dispatch_attempt(
+    workflow_revision_ref: RecordRef, task_id: str = "task-1"
+) -> ParsedCandidate:
+    """Build a validated Attempt Packet candidate bound to a revision."""
+
+    result = read_candidate(
+        {
+            "contract_kind": "attempt_packet",
+            "protocol_version": 1,
+            "schema_version": 1,
+            "payload": {
+                "workflow_revision": workflow_revision_ref.to_canonical_value(),
+                "task_id": task_id,
+                "implementer_identity": "implementer-1",
+                "context_digest": "fixture-context",
+                "workspace_snapshot_digest": "fixture-workspace",
+                "runtime_capability_profile_identity": "fixture-runtime",
+            },
+        }
+    )
+    assert result.ok, result.reason
+    return result.value
+
+
 class PublishTests(unittest.TestCase):
     def setUp(self) -> None:
         state = tempfile.TemporaryDirectory()
@@ -169,7 +193,7 @@ class PublishTests(unittest.TestCase):
         stale = publish(
             self.state,
             genesis.run_id,
-            dispatch_workflow(genesis.record_ref, task_id="task-2"),
+            dispatch_attempt(child.record_ref),
             genesis.record_ref,
             "key-3",
         )
@@ -314,14 +338,6 @@ class PublishTests(unittest.TestCase):
     def test_revision_with_wrong_genesis_binding_rejects(self) -> None:
         genesis = publish(self.state, None, dispatch_request(), None, "key-1")
         self.assertIsInstance(genesis, Published)
-        child = publish(
-            self.state,
-            genesis.run_id,
-            dispatch_workflow(genesis.record_ref),
-            genesis.record_ref,
-            "key-2",
-        )
-        self.assertIsInstance(child, Published)
 
         wrong_digest = RecordRef(
             contract_kind="request",
@@ -332,29 +348,18 @@ class PublishTests(unittest.TestCase):
             self.state,
             genesis.run_id,
             dispatch_workflow(wrong_digest, task_id="task-3"),
-            child.record_ref,
-            "key-3",
+            genesis.record_ref,
+            "key-2",
         )
         self.assertIsInstance(result, Rejected)
         self.assertEqual(
             result.code, PublishRejectionCode.GENESIS_REQUEST_BINDING_MISMATCH
         )
-        self.assertEqual(
-            self.sequence_files(genesis.run_id),
-            ["0000000001.json", "0000000002.json"],
-        )
+        self.assertEqual(self.sequence_files(genesis.run_id), ["0000000001.json"])
 
     def test_revision_bound_to_other_run_genesis_rejects(self) -> None:
         genesis = publish(self.state, None, dispatch_request(), None, "key-1")
         self.assertIsInstance(genesis, Published)
-        child = publish(
-            self.state,
-            genesis.run_id,
-            dispatch_workflow(genesis.record_ref),
-            genesis.record_ref,
-            "key-2",
-        )
-        self.assertIsInstance(child, Published)
         other_run = publish(
             self.state, None, dispatch_request(objective="Other run"), None, "key-other"
         )
@@ -364,17 +369,14 @@ class PublishTests(unittest.TestCase):
             self.state,
             genesis.run_id,
             dispatch_workflow(other_run.record_ref, task_id="task-3"),
-            child.record_ref,
-            "key-3",
+            genesis.record_ref,
+            "key-2",
         )
         self.assertIsInstance(result, Rejected)
         self.assertEqual(
             result.code, PublishRejectionCode.GENESIS_REQUEST_BINDING_MISMATCH
         )
-        self.assertEqual(
-            self.sequence_files(genesis.run_id),
-            ["0000000001.json", "0000000002.json"],
-        )
+        self.assertEqual(self.sequence_files(genesis.run_id), ["0000000001.json"])
 
     def test_malformed_run_id_rejects_without_touching_filesystem(self) -> None:
         genesis = publish(self.state, None, dispatch_request(), None, "key-1")

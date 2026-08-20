@@ -69,6 +69,30 @@ def dispatch_workflow(
     return result.value
 
 
+def dispatch_attempt(
+    workflow_revision_ref: RecordRef, task_id: str = "task-1"
+) -> ParsedCandidate:
+    """Build a validated Attempt Packet candidate bound to a revision."""
+
+    result = read_candidate(
+        {
+            "contract_kind": "attempt_packet",
+            "protocol_version": 1,
+            "schema_version": 1,
+            "payload": {
+                "workflow_revision": workflow_revision_ref.to_canonical_value(),
+                "task_id": task_id,
+                "implementer_identity": "implementer-1",
+                "context_digest": "fixture-context",
+                "workspace_snapshot_digest": "fixture-workspace",
+                "runtime_capability_profile_identity": "fixture-runtime",
+            },
+        }
+    )
+    assert result.ok, result.reason
+    return result.value
+
+
 def simulated_crash() -> None:
     raise RuntimeError("simulated crash")
 
@@ -223,7 +247,7 @@ class FaultInjectionTests(unittest.TestCase):
         third = publish(
             self.state,
             genesis.run_id,
-            dispatch_workflow(genesis.record_ref, task_id="task-3"),
+            dispatch_attempt(recovered.last_record_id),
             recovered.last_record_id,
             "key-3",
         )
