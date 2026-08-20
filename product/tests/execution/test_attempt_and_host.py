@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
 from kernel.canonical import content_digest
 from kernel.protocol import ContractKind, RecordRef
@@ -15,8 +18,14 @@ from kernel.protocol_v1 import (
     receipt_v1_content_digest,
     result_v1_content_digest,
 )
-from execution.attempt import build_attempt_packet, build_receipt
+from execution.attempt import _fixture_digest, build_attempt_packet, build_receipt
+from execution.opencode_adapter import probe_opencode_profile
 from execution.stub_host import stub_execute
+from execution.workspace_snapshot import snapshot_identity
+
+FIXTURE_BINARY = (
+    Path(__file__).resolve().parent / "fixtures" / "fake_opencode" / "fake_opencode.py"
+)
 
 WORKFLOW_REVISION_REF = RecordRef(
     contract_kind=ContractKind.WORKFLOW_REVISION.value,
@@ -31,35 +40,76 @@ ATTEMPT_REF = RecordRef(
 
 
 class BuildAttemptPacketTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self._temporary_directory.name) / "repo"
+        self._init_repo(self.root)
+        (self.root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+        self._git(self.root, "add", "tracked.txt")
+        self._git(self.root, "commit", "-m", "initial attempt fixture")
+
+    def tearDown(self) -> None:
+        self._temporary_directory.cleanup()
+
+    @staticmethod
+    def _git(cwd: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def _init_repo(self, path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+        self._git(path, "init")
+        self._git(path, "config", "user.email", "attempt-tests@example.invalid")
+        self._git(path, "config", "user.name", "Attempt Packet Tests")
+
+    def _build_packet(self, task_id: str = "task-1"):
+        return build_attempt_packet(
+            WORKFLOW_REVISION_REF,
+            task_id,
+            "impl-1",
+            self.root,
+            str(FIXTURE_BINARY),
+        )
+
     def test_binds_published_workflow_revision_ref(self) -> None:
-        packet = build_attempt_packet(WORKFLOW_REVISION_REF, "task-1", "impl-1")
+        packet = self._build_packet()
         self.assertEqual(packet.workflow_revision, WORKFLOW_REVISION_REF)
         self.assertEqual(packet.task_id, "task-1")
         self.assertEqual(packet.implementer_identity, "impl-1")
 
-    def test_fixture_identity_fields_are_digest_shaped_and_deterministic(self) -> None:
-        first = build_attempt_packet(WORKFLOW_REVISION_REF, "task-1", "impl-1")
-        second = build_attempt_packet(WORKFLOW_REVISION_REF, "task-1", "impl-1")
-        for field in (
-            "context_digest",
-            "workspace_snapshot_digest",
-            "runtime_capability_profile_identity",
-        ):
-            self.assertTrue(
-                getattr(first, field).startswith("sha256:agent-platform-json-v1:")
-            )
-            self.assertEqual(getattr(first, field), getattr(second, field))
-        other_task = build_attempt_packet(WORKFLOW_REVISION_REF, "task-2", "impl-1")
+    def test_identity_fields_are_real_and_deterministic(self) -> None:
+        first = self._build_packet()
+        second = self._build_packet()
+        self.assertEqual(first.context_digest, _fixture_digest("context", "task-1"))
+        self.assertEqual(first.context_digest, second.context_digest)
+        self.assertEqual(
+            first.workspace_snapshot_digest, snapshot_identity(self.root).digest
+        )
+        self.assertEqual(
+            first.runtime_capability_profile_identity,
+            probe_opencode_profile(str(FIXTURE_BINARY)).identity,
+        )
+        self.assertEqual(first.workspace_snapshot_digest, second.workspace_snapshot_digest)
+        self.assertEqual(
+            first.runtime_capability_profile_identity,
+            second.runtime_capability_profile_identity,
+        )
+        other_task = self._build_packet("task-2")
         self.assertNotEqual(first.context_digest, other_task.context_digest)
 
     def test_packet_reads_back_through_strict_reader(self) -> None:
-        packet = build_attempt_packet(WORKFLOW_REVISION_REF, "task-1", "impl-1")
+        packet = self._build_packet()
         outcome = read_attempt_packet_v1(packet.to_canonical_value())
         self.assertEqual(outcome.value, packet)
 
     def test_content_digest_deterministic(self) -> None:
-        first = build_attempt_packet(WORKFLOW_REVISION_REF, "task-1", "impl-1")
-        second = build_attempt_packet(WORKFLOW_REVISION_REF, "task-1", "impl-1")
+        first = self._build_packet()
+        second = self._build_packet()
         self.assertEqual(
             attempt_packet_v1_content_digest(first),
             attempt_packet_v1_content_digest(second),

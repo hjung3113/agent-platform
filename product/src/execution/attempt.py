@@ -1,14 +1,17 @@
-"""Pure builders for M2 fixture-level execution-chain candidates.
+"""Builders for execution-chain candidates with M2/M3 identity semantics.
 
 These builders construct *unpublished* candidate payloads from identities the
 caller already holds. Every ``RecordRef`` argument must be the published
 record identity ``publish()`` actually returned — a candidate payload object
 carries no Kernel-assigned ``record_id``/``content_digest`` and cannot fill a
-contract's own binding field. No real context compilation, workspace
-inspection, or runtime execution exists here.
+contract's own binding field. M3 computes the workspace snapshot and runtime
+capability profile identities from the real workspace and adapter probe here;
+``context_digest`` remains M2's fixture identity until M4's Context Compiler.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 from kernel.canonical import content_digest
 from kernel.protocol import RecordRef
@@ -17,6 +20,8 @@ from kernel.protocol_v1 import (
     AttemptPacketV1,
     ReceiptV1,
 )
+from execution.opencode_adapter import probe_opencode_profile
+from execution.workspace_snapshot import snapshot_identity
 
 _FIXTURE_TAG = "m2-fixture"
 
@@ -28,14 +33,21 @@ def _fixture_digest(purpose: str, task_id: str) -> str:
 
 
 def build_attempt_packet(
-    workflow_revision_ref: RecordRef, task_id: str, implementer_identity: str
+    workflow_revision_ref: RecordRef,
+    task_id: str,
+    implementer_identity: str,
+    workspace_root: Path,
+    opencode_binary_path: str,
+    config_paths: tuple[Path, ...] = (),
+    declared_generated_paths: tuple[str, ...] = (),
 ) -> AttemptPacketV1:
     """Build an Attempt Packet candidate bound to a published Workflow Revision.
 
-    The fixture-level identity fields (``context_digest``,
-    ``workspace_snapshot_digest``, ``runtime_capability_profile_identity``)
-    are deterministic digests of fixed constants scoped by ``task_id``; no
-    real Context Compiler or Host snapshot exists in M2.
+    ``workspace_snapshot_digest`` and
+    ``runtime_capability_profile_identity`` are resolved from the real
+    workspace and OpenCode adapter profile at packet-construction time.
+    ``context_digest`` intentionally remains M2's deterministic fixture value;
+    real Context Compilation is M4 scope.
     """
 
     return AttemptPacketV1(
@@ -43,10 +55,12 @@ def build_attempt_packet(
         task_id=task_id,
         implementer_identity=implementer_identity,
         context_digest=_fixture_digest("context", task_id),
-        workspace_snapshot_digest=_fixture_digest("workspace_snapshot", task_id),
-        runtime_capability_profile_identity=_fixture_digest(
-            "runtime_capability_profile", task_id
-        ),
+        workspace_snapshot_digest=snapshot_identity(
+            workspace_root, declared_generated_paths
+        ).digest,
+        runtime_capability_profile_identity=probe_opencode_profile(
+            opencode_binary_path, config_paths
+        ).identity,
     )
 
 

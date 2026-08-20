@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from kernel.canonical import content_digest
@@ -21,6 +23,14 @@ from kernel.replay import replay
 from execution.attempt import build_attempt_packet, build_receipt
 from execution.stub_host import stub_execute
 from verification.stub_verifier import stub_verify
+
+FIXTURE_BINARY = (
+    Path(__file__).resolve().parent.parent
+    / "execution"
+    / "fixtures"
+    / "fake_opencode"
+    / "fake_opencode.py"
+)
 
 IMPLEMENTER_IDENTITY = "implementer-1"
 VERIFIER_IDENTITY = "verifier-1"
@@ -75,9 +85,34 @@ class ChainThroughResult:
 
 class M2IntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
-        state = tempfile.TemporaryDirectory()
-        self.addCleanup(state.cleanup)
-        self.state = state.name
+        self._state_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._state_directory.cleanup)
+        self.state = self._state_directory.name
+        self._workspace_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._workspace_directory.cleanup)
+        self.workspace_root = Path(self._workspace_directory.name) / "repo"
+        self._init_repo(self.workspace_root)
+        (self.workspace_root / "tracked.txt").write_text(
+            "tracked\n", encoding="utf-8"
+        )
+        self._git(self.workspace_root, "add", "tracked.txt")
+        self._git(self.workspace_root, "commit", "-m", "initial M2 fixture")
+
+    @staticmethod
+    def _git(cwd: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def _init_repo(self, path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+        self._git(path, "init")
+        self._git(path, "config", "user.email", "m2-tests@example.invalid")
+        self._git(path, "config", "user.name", "M2 Integration Tests")
 
     def publish_chain_through_result(self) -> ChainThroughResult:
         """Drive Request -> Workflow Revision -> Attempt Packet -> Result."""
@@ -101,6 +136,8 @@ class M2IntegrationTests(unittest.TestCase):
             workflow_revision_ref=workflow.record_ref,
             task_id=TASK.task_id,
             implementer_identity=IMPLEMENTER_IDENTITY,
+            workspace_root=self.workspace_root,
+            opencode_binary_path=str(FIXTURE_BINARY),
         )
         attempt = publish(
             self.state,
