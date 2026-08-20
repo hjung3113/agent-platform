@@ -1,6 +1,47 @@
 # Handoff
 
-## Completed in this slice
+## Completed in this slice (M2 planning)
+
+- M2 — One-task protocol E2E (Attempt/Result/Verification/Receipt) implementation plan
+  written and merged: [`docs/plans/active/m2-one-task-protocol-e2e.md`](docs/plans/active/m2-one-task-protocol-e2e.md),
+  PR #42.
+- Grilled the design with the user (design tree, 4 rounds) after a codex (`gpt-5.6-luna
+  max`, via `orca terminal`) research pass over the M2-relevant specs/ADRs/roadmap and the
+  current M1 kernel implementation. Key decisions locked into the plan doc:
+  - 4 new `ContractKind`s (`attempt_packet`, `result`, `verification`, `receipt`), each
+    independently published/fenced through M1's existing `publish()`/`lineage_store.py`
+    mechanism — Runtime Observation is embedded in `result`'s payload, not a 5th kind.
+  - `publish.py`'s hardcoded 2-step state check generalizes to a linear
+    `head-kind -> next-kind` transition table (request→workflow_revision→attempt_packet→
+    result→verification→receipt), each kind one-per-run, no branching/retry.
+  - Verification `verdict` is a **total function** of `coverage`
+    (PASS iff all SATISFIED > BLOCKED iff any BLOCKED > else FAIL), reader-enforced.
+  - Each `SATISFIED` coverage entry carries an `evidence_digest` bound to the Result's
+    `output_snapshot_digest`, checked at the (lineage-aware) publish boundary — closes a
+    "PASS from assertion alone" gap a reviewer found.
+  - `coverage`-vs-`acceptance_criteria` and Result/Attempt/Verification cross-record
+    bindings are publish-level checks; payload-local self-consistency (e.g.
+    `result.observation` digest match) is reader-level — this reader/publish split was a
+    real defect in the first draft (two independent reviewers caught it) and is now
+    explicit in the plan.
+  - `ReceiptV1` carries `receipt_type: "terminal"` (spec 03's checkpoint/terminal
+    discriminator) instead of inferring terminality from record presence.
+  - stub Host lives in `product/src/execution/` (already scaffolded), stub Verifier in
+    `product/src/verification/` (already scaffolded) — no new top-level module.
+  - **Deliberately deferred, not a gap**: self-verification is closed by plain
+    `verifier_identity != implementer_identity` string inequality, not real
+    execution-provenance-independent identity — that's issue #34's M5 bullet
+    ("execution-provenance independence"), documented in the plan as an explicit
+    non-goal so it doesn't read as an oversight later.
+  - Plan doc §8 breaks implementation into 5 independently-reviewable PRs (protocol
+    readers → publish state machine → replay extension → stub Host/Verifier →
+    end-to-end integration); §9 has the full exit gate.
+- Adversarial review (user's own pass + automated codex review) on the first plan draft
+  found 3 P1s (unconstructible stub APIs, reader doing a lineage-aware check it can't
+  perform, undefined verdict totality) + evidence-binding and receipt-typing gaps; all
+  fixed in the plan before merge (see PR #42 commit history for the full before/after).
+
+## Completed earlier (M1)
 
 - M1 — Kernel authoritative publication and replay spine, 4 PRs per
   [`docs/plans/active/m1-kernel-authoritative-publication.md`](docs/plans/active/m1-kernel-authoritative-publication.md):
@@ -64,21 +105,45 @@
 
 ## Next session — fixed scope
 
-Follow Issue #34's milestone order. Implement **M2 — Attempt/Result/Verification/Receipt**
-next. M1 is a closed prerequisite: do not reopen `lineage_store.py` / `publish.py` /
-`replay.py` semantics without a design-doc update first.
+**Implement M2** per the merged plan doc:
+[`docs/plans/active/m2-one-task-protocol-e2e.md`](docs/plans/active/m2-one-task-protocol-e2e.md)
+(PR #42). The design is closed — do not re-derive schemas/state-machine/rejection codes
+from the specs again; read the plan doc first, it already answers those questions and
+records why. Only reopen it if implementation surfaces a real contradiction with the
+governing specs/ADRs (update the plan doc, or escalate to the specs, before coding around
+it).
 
-Required M2 scope (per HANDOFF's prior deferral list, to be detailed in a new
-`docs/plans/active/m2-*.md` before implementation):
+Follow the plan's §8 order, 5 independently-reviewable PRs:
 
-1. Attempt Packet representation and admission wiring onto the M1 publish boundary.
-2. Explicit stub Host boundary (no real process/network/secret isolation yet — that is
-   #7/#8, later).
-3. Result / minimal Evidence / Verification representation.
-4. Independent Verifier execution identity.
-5. Terminal Receipt.
-6. One-task protocol E2E through the full Request → WorkflowRevision → Attempt → Result →
-   Verification → Receipt chain.
+1. Protocol extension — `protocol.py` new `ContractKind`s, `protocol_v1.py`
+   `AttemptPacketV1`/`ResultV1`/`VerificationV1`/`ReceiptV1` readers. Golden + negative
+   reader tests only.
+2. Kernel publish state-machine generalization — `publish.py` transition table, new
+   `PublishRejectionCode`s (`RUN_ALREADY_TERMINAL`, `ATTEMPT_TASK_BINDING_MISMATCH`,
+   `RESULT_ATTEMPT_BINDING_MISMATCH`, `VERIFICATION_RESULT_BINDING_MISMATCH`,
+   `VERIFICATION_COVERAGE_MISMATCH`, `SELF_VERIFICATION_REJECTED`,
+   `RECEIPT_VERIFICATION_NOT_PASSED`), per-kind binding checks, verdict-gated Receipt
+   admission.
+3. Replay extension — `replay.py` six-field `RunState`, `terminal` property keyed off
+   `receipt_type == "terminal"`.
+4. Stub Host + stub Verifier — `product/src/execution/attempt.py` +
+   `product/src/execution/stub_host.py`, `product/src/verification/stub_verifier.py`.
+   Builder signatures take the published `RecordRef` from `publish()`, not payload objects
+   (see plan §6 — this was a real defect caught in review, don't reintroduce it).
+5. End-to-end integration — wire stub Host/Verifier through `publish()`;
+   `test_m2_integration.py` golden PASS and FAIL fixtures.
+
+M1 is a closed prerequisite: do not reopen `lineage_store.py`'s or `replay.py`'s M1-proven
+invariants (atomic append, predecessor fencing, idempotency, commit-before-projection
+ordering). `publish.py`'s state-machine check is the one M1 piece M2 *does* extend, per
+plan §4 — that's expected, not a regression risk, as long as the M1 exit-gate behaviors
+(genesis/Request-only, WorkflowRevision binding, idempotency, fault-injection ordering)
+stay intact under the new transition table.
+
+Exit gate for checking M2 in Issue #34: plan doc §9 (full chain golden fixture,
+stale-binding/self-verification/missing-evidence/duplicate-terminal all fail closed,
+FAIL/BLOCKED Verification publishes but produces no Receipt, all M0/M1 suites green, no
+M3+ scope creep).
 
 ## Deferred until the corresponding gate
 
