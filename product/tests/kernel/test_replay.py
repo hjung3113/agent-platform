@@ -11,6 +11,8 @@ from kernel.publish import Published, publish
 from kernel.replay import RunState, replay
 
 OTHER_DIGEST = "sha256:agent-platform-json-v1:" + "f" * 64
+OUTPUT_SNAPSHOT_DIGEST = "sha256:agent-platform-json-v1:" + "e" * 64
+CRITERIA = ["Replay is deterministic"]
 
 
 def dispatch_request(
@@ -51,6 +53,99 @@ def dispatch_workflow(
                     "objective": "Fold the committed records",
                     "acceptance_criteria": ["Replay is deterministic"],
                 },
+            },
+        }
+    )
+    assert result.ok, result.reason
+    return result.value
+
+
+def dispatch_attempt(
+    workflow_revision_ref: RecordRef, task_id: str = "task-1"
+) -> ParsedCandidate:
+    """Build a validated Attempt Packet candidate bound to a revision."""
+
+    result = read_candidate(
+        {
+            "contract_kind": "attempt_packet",
+            "protocol_version": 1,
+            "schema_version": 1,
+            "payload": {
+                "workflow_revision": workflow_revision_ref.to_canonical_value(),
+                "task_id": task_id,
+                "implementer_identity": "implementer-1",
+                "context_digest": "fixture-context",
+                "workspace_snapshot_digest": "fixture-workspace",
+                "runtime_capability_profile_identity": "fixture-runtime",
+            },
+        }
+    )
+    assert result.ok, result.reason
+    return result.value
+
+
+def dispatch_result(
+    attempt: RecordRef,
+    output_snapshot_digest: str = OUTPUT_SNAPSHOT_DIGEST,
+) -> ParsedCandidate:
+    """Build a validated Result candidate bound to ``attempt``."""
+
+    result = read_candidate(
+        {
+            "contract_kind": "result",
+            "protocol_version": 1,
+            "schema_version": 1,
+            "payload": {
+                "attempt": attempt.to_canonical_value(),
+                "output_snapshot_digest": output_snapshot_digest,
+                "observation": {
+                    "runtime_identity": "runtime-m2",
+                    "output_snapshot_digest": output_snapshot_digest,
+                },
+            },
+        }
+    )
+    assert result.ok, result.reason
+    return result.value
+
+
+def dispatch_verification(
+    result: RecordRef,
+    coverage: list[dict],
+    verdict: str,
+    findings: tuple[str, ...] = (),
+) -> ParsedCandidate:
+    """Build a validated Verification candidate bound to ``result``."""
+
+    verification = read_candidate(
+        {
+            "contract_kind": "verification",
+            "protocol_version": 1,
+            "schema_version": 1,
+            "payload": {
+                "result": result.to_canonical_value(),
+                "verifier_identity": "verifier-1",
+                "coverage": coverage,
+                "verdict": verdict,
+                "findings": list(findings),
+            },
+        }
+    )
+    assert verification.ok, verification.reason
+    return verification.value
+
+
+def dispatch_receipt(verification: RecordRef) -> ParsedCandidate:
+    """Build a validated terminal Receipt candidate."""
+
+    result = read_candidate(
+        {
+            "contract_kind": "receipt",
+            "protocol_version": 1,
+            "schema_version": 1,
+            "payload": {
+                "verification": verification.to_canonical_value(),
+                "receipt_type": "terminal",
             },
         }
     )
@@ -170,7 +265,7 @@ class ReplayTests(unittest.TestCase):
         third = publish(
             self.state,
             genesis.run_id,
-            dispatch_workflow(genesis.record_ref, task_id="task-3"),
+            dispatch_attempt(child.record_ref),
             child.record_ref,
             "key-3",
         )
@@ -186,6 +281,144 @@ class ReplayTests(unittest.TestCase):
                 (run_dir / missing).write_bytes(backup)
 
         self.assertEqual(replay(self.state, genesis.run_id).last_sequence, 3)
+
+    def test_full_six_record_run_replays_terminal(self) -> None:
+        genesis = publish(self.state, None, dispatch_request(), None, "key-1")
+        self.assertIsInstance(genesis, Published)
+        workflow = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_workflow(genesis.record_ref),
+            genesis.record_ref,
+            "key-2",
+        )
+        self.assertIsInstance(workflow, Published)
+        attempt = dispatch_attempt(workflow.record_ref)
+        attempt_published = publish(
+            self.state, genesis.run_id, attempt, workflow.record_ref, "key-3"
+        )
+        self.assertIsInstance(attempt_published, Published)
+        result = dispatch_result(attempt_published.record_ref)
+        result_published = publish(
+            self.state, genesis.run_id, result, attempt_published.record_ref, "key-4"
+        )
+        self.assertIsInstance(result_published, Published)
+        coverage = [
+            {
+                "criterion": criterion,
+                "status": "SATISFIED",
+                "evidence_digest": OUTPUT_SNAPSHOT_DIGEST,
+            }
+            for criterion in CRITERIA
+        ]
+        verification = dispatch_verification(
+            result_published.record_ref, coverage, "PASS"
+        )
+        verification_published = publish(
+            self.state,
+            genesis.run_id,
+            verification,
+            result_published.record_ref,
+            "key-5",
+        )
+        self.assertIsInstance(verification_published, Published)
+        receipt = dispatch_receipt(verification_published.record_ref)
+        receipt_published = publish(
+            self.state,
+            genesis.run_id,
+            receipt,
+            verification_published.record_ref,
+            "key-6",
+        )
+        self.assertIsInstance(receipt_published, Published)
+
+        first = replay(self.state, genesis.run_id)
+        second = replay(self.state, genesis.run_id)
+        self.assertEqual(first, second)
+        self.assertTrue(first.terminal)
+        self.assertEqual(first.last_sequence, 6)
+        self.assertEqual(first.last_record_id, receipt_published.record_ref)
+        self.assertEqual(first.attempt_packet, attempt.value)
+        self.assertEqual(first.result, result.value)
+        self.assertEqual(first.verification, verification.value)
+        self.assertEqual(first.receipt, receipt.value)
+
+    def test_fail_terminated_five_record_run_is_not_terminal(self) -> None:
+        genesis = publish(self.state, None, dispatch_request(), None, "key-1")
+        self.assertIsInstance(genesis, Published)
+        workflow = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_workflow(genesis.record_ref),
+            genesis.record_ref,
+            "key-2",
+        )
+        self.assertIsInstance(workflow, Published)
+        attempt = dispatch_attempt(workflow.record_ref)
+        attempt_published = publish(
+            self.state, genesis.run_id, attempt, workflow.record_ref, "key-3"
+        )
+        self.assertIsInstance(attempt_published, Published)
+        result = dispatch_result(attempt_published.record_ref)
+        result_published = publish(
+            self.state,
+            genesis.run_id,
+            result,
+            attempt_published.record_ref,
+            "key-4",
+        )
+        self.assertIsInstance(result_published, Published)
+        coverage = [
+            {"criterion": criterion, "status": "UNSATISFIED", "evidence_digest": None}
+            for criterion in CRITERIA
+        ]
+        verification = dispatch_verification(
+            result_published.record_ref, coverage, "FAIL", ("Digest mismatch",)
+        )
+        verification_published = publish(
+            self.state,
+            genesis.run_id,
+            verification,
+            result_published.record_ref,
+            "key-5",
+        )
+        self.assertIsInstance(verification_published, Published)
+
+        state = replay(self.state, genesis.run_id)
+        self.assertFalse(state.terminal)
+        self.assertEqual(state.last_sequence, 5)
+        self.assertEqual(state.request, dispatch_request().value)
+        self.assertEqual(state.attempt_packet, attempt.value)
+        self.assertEqual(state.result, result.value)
+        self.assertEqual(state.verification, verification.value)
+        self.assertIsNone(state.receipt)
+
+    def test_new_fields_stay_none_at_intermediate_chain_points(self) -> None:
+        genesis = publish(self.state, None, dispatch_request(), None, "key-1")
+        self.assertIsInstance(genesis, Published)
+        workflow = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_workflow(genesis.record_ref),
+            genesis.record_ref,
+            "key-2",
+        )
+        self.assertIsInstance(workflow, Published)
+        attempt = dispatch_attempt(workflow.record_ref)
+        attempt_published = publish(
+            self.state, genesis.run_id, attempt, workflow.record_ref, "key-3"
+        )
+        self.assertIsInstance(attempt_published, Published)
+
+        state = replay(self.state, genesis.run_id)
+        self.assertEqual(state.last_sequence, 3)
+        self.assertIsNotNone(state.request)
+        self.assertIsNotNone(state.workflow_revision)
+        self.assertEqual(state.attempt_packet, attempt.value)
+        self.assertIsNone(state.result)
+        self.assertIsNone(state.verification)
+        self.assertIsNone(state.receipt)
+        self.assertFalse(state.terminal)
 
 
 if __name__ == "__main__":

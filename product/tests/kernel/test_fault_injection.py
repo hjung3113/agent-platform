@@ -69,6 +69,105 @@ def dispatch_workflow(
     return result.value
 
 
+def dispatch_attempt(
+    workflow_revision_ref: RecordRef, task_id: str = "task-1"
+) -> ParsedCandidate:
+    """Build a validated Attempt Packet candidate bound to a revision."""
+
+    result = read_candidate(
+        {
+            "contract_kind": "attempt_packet",
+            "protocol_version": 1,
+            "schema_version": 1,
+            "payload": {
+                "workflow_revision": workflow_revision_ref.to_canonical_value(),
+                "task_id": task_id,
+                "implementer_identity": "implementer-1",
+                "context_digest": "fixture-context",
+                "workspace_snapshot_digest": "fixture-workspace",
+                "runtime_capability_profile_identity": "fixture-runtime",
+            },
+        }
+    )
+    assert result.ok, result.reason
+    return result.value
+
+
+def dispatch_result(
+    attempt: RecordRef,
+    output_snapshot_digest: str = "sha256:agent-platform-json-v1:" + "e" * 64,
+) -> ParsedCandidate:
+    """Build a validated Result candidate bound to ``attempt``."""
+
+    result = read_candidate(
+        {
+            "contract_kind": "result",
+            "protocol_version": 1,
+            "schema_version": 1,
+            "payload": {
+                "attempt": attempt.to_canonical_value(),
+                "output_snapshot_digest": output_snapshot_digest,
+                "observation": {
+                    "runtime_identity": "runtime-m2",
+                    "output_snapshot_digest": output_snapshot_digest,
+                },
+            },
+        }
+    )
+    assert result.ok, result.reason
+    return result.value
+
+
+def dispatch_verification(
+    result: RecordRef,
+    criteria: list[str],
+    evidence_digest: str,
+) -> ParsedCandidate:
+    """Build a validated PASS Verification candidate bound to ``result``."""
+
+    verification = read_candidate(
+        {
+            "contract_kind": "verification",
+            "protocol_version": 1,
+            "schema_version": 1,
+            "payload": {
+                "result": result.to_canonical_value(),
+                "verifier_identity": "verifier-1",
+                "coverage": [
+                    {
+                        "criterion": criterion,
+                        "status": "SATISFIED",
+                        "evidence_digest": evidence_digest,
+                    }
+                    for criterion in criteria
+                ],
+                "verdict": "PASS",
+                "findings": [],
+            },
+        }
+    )
+    assert verification.ok, verification.reason
+    return verification.value
+
+
+def dispatch_receipt(verification: RecordRef) -> ParsedCandidate:
+    """Build a validated terminal Receipt candidate."""
+
+    result = read_candidate(
+        {
+            "contract_kind": "receipt",
+            "protocol_version": 1,
+            "schema_version": 1,
+            "payload": {
+                "verification": verification.to_canonical_value(),
+                "receipt_type": "terminal",
+            },
+        }
+    )
+    assert result.ok, result.reason
+    return result.value
+
+
 def simulated_crash() -> None:
     raise RuntimeError("simulated crash")
 
@@ -223,7 +322,7 @@ class FaultInjectionTests(unittest.TestCase):
         third = publish(
             self.state,
             genesis.run_id,
-            dispatch_workflow(genesis.record_ref, task_id="task-3"),
+            dispatch_attempt(recovered.last_record_id),
             recovered.last_record_id,
             "key-3",
         )
@@ -234,6 +333,104 @@ class FaultInjectionTests(unittest.TestCase):
         self.assertEqual(healed.last_sequence, 3)
         self.assertEqual(healed.last_record_file, "0000000003.json")
         self.assertEqual(healed.last_record["record_id"], third.record_ref.record_id)
+
+    def test_publish_self_heals_stale_head_after_crash_at_receipt_commit(
+        self,
+    ) -> None:
+        genesis = publish(self.state, None, dispatch_request(), None, "key-1")
+        self.assertIsInstance(genesis, Published)
+        workflow = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_workflow(genesis.record_ref),
+            genesis.record_ref,
+            "key-2",
+        )
+        self.assertIsInstance(workflow, Published)
+        attempt = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_attempt(workflow.record_ref),
+            workflow.record_ref,
+            "key-3",
+        )
+        self.assertIsInstance(attempt, Published)
+        result = dispatch_result(attempt.record_ref)
+        result_published = publish(
+            self.state, genesis.run_id, result, attempt.record_ref, "key-4"
+        )
+        self.assertIsInstance(result_published, Published)
+        verification = dispatch_verification(
+            result_published.record_ref,
+            ["Replay recovers authority"],
+            result.value.output_snapshot_digest,
+        )
+        verification_published = publish(
+            self.state,
+            genesis.run_id,
+            verification,
+            result_published.record_ref,
+            "key-5",
+        )
+        self.assertIsInstance(verification_published, Published)
+
+        with self.assertRaises(RuntimeError):
+            publish(
+                self.state,
+                genesis.run_id,
+                dispatch_receipt(verification_published.record_ref),
+                verification_published.record_ref,
+                "key-6",
+                commit_barrier=simulated_crash,
+            )
+
+        run = open_run(self.state, genesis.run_id)
+        stale = run.read_head()
+        self.assertIsNotNone(stale)
+        self.assertEqual(stale.last_sequence, 5)
+        self.assertTrue((run.run_dir / "0000000006.json").is_file())
+
+        # The committed Receipt is recoverable via replay() — terminal state
+        # is derived from the record files, not the stale projection.
+        recovered = replay(self.state, genesis.run_id)
+        self.assertEqual(recovered.last_sequence, 6)
+        self.assertEqual(
+            recovered.last_record_id.record_id, f"{genesis.run_id}:0000000006"
+        )
+        self.assertEqual(recovered.receipt.receipt_type, "terminal")
+        self.assertTrue(recovered.terminal)
+
+        # The run is genuinely terminal: a new publish rejects before any
+        # head repair, and the idempotent same-key/same-content retry
+        # returns the committed Published after repairing the projection.
+        rejected = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_receipt(verification_published.record_ref),
+            verification_published.record_ref,
+            "key-6-other",
+        )
+        self.assertIsInstance(rejected, Rejected)
+        self.assertEqual(
+            rejected.code, PublishRejectionCode.RUN_ALREADY_TERMINAL
+        )
+
+        retry = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_receipt(verification_published.record_ref),
+            verification_published.record_ref,
+            "key-6",
+        )
+        self.assertIsInstance(retry, Published)
+        self.assertEqual(
+            retry.record_ref.record_id, f"{genesis.run_id}:0000000006"
+        )
+
+        healed = run.read_head()
+        self.assertEqual(healed.last_sequence, 6)
+        self.assertEqual(healed.last_record_file, "0000000006.json")
+        self.assertEqual(healed.last_record["record_id"], retry.record_ref.record_id)
 
     def test_publish_self_heals_forged_valid_json_head(self) -> None:
         genesis = publish(self.state, None, dispatch_request(), None, "key-1")

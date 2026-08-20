@@ -1,0 +1,27 @@
+{
+  "contract_kind": "verification",
+  "protocol_version": 1,
+  "schema_version": 1,
+  "payload": {
+    "result": {
+      "contract_kind": "result",
+      "record_id": "rec-result-0001",
+      "content_digest": "sha256:agent-platform-json-v1:19ab5e0a4db061e0d49006c331f78f17cafe25b7064bd2eac69074d7a8aca923"
+    },
+    "verifier_identity": "stub-verifier-m2",
+    "coverage": [
+      {
+        "criterion": "Every unsupported contract, protocol, or schema combination rejects",
+        "status": "SATISFIED",
+        "evidence_digest": "sha256:agent-platform-json-v1:162495ee90155423030f305bc49c79851391e2d3d8b7180cea2f9ab592c3a1ad"
+      },
+      {
+        "criterion": "Golden canonical bytes and digests stay fixed",
+        "status": "SATISFIED",
+        "evidence_digest": "sha256:agent-platform-json-v1:162495ee90155423030f305bc49c79851391e2d3d8b7180cea2f9ab592c3a1ad"
+      }
+    ],
+    "verdict": "PASS",
+    "findings": []
+  }
+}

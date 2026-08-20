@@ -22,7 +22,14 @@ from typing import Any, Iterator
 
 from kernel.canonical import content_digest
 from kernel.protocol import RecordRef, read_candidate
-from kernel.protocol_v1 import RequestV1, WorkflowRevisionV1
+from kernel.protocol_v1 import (
+    AttemptPacketV1,
+    ReceiptV1,
+    RequestV1,
+    ResultV1,
+    VerificationV1,
+    WorkflowRevisionV1,
+)
 
 _RECORD_FILENAME = re.compile(r"^(\d{10})\.json$")
 
@@ -35,6 +42,21 @@ class RunState:
     workflow_revision: WorkflowRevisionV1 | None
     last_sequence: int
     last_record_id: RecordRef | None
+    attempt_packet: AttemptPacketV1 | None = None
+    result: ResultV1 | None = None
+    verification: VerificationV1 | None = None
+    receipt: ReceiptV1 | None = None
+
+    @property
+    def terminal(self) -> bool:
+        """True only when a terminal Receipt is committed (plan §3/§5).
+
+        Deliberately keyed off ``receipt_type`` rather than mere Receipt
+        presence, so a future checkpoint Receipt variant cannot be mistaken
+        for a run end.
+        """
+
+        return self.receipt is not None and self.receipt.receipt_type == "terminal"
 
 
 def _committed_envelopes(run_dir: Path) -> Iterator[tuple[int, dict[str, Any]]]:
@@ -77,9 +99,9 @@ def replay(state_dir: str, run_id: str) -> RunState:
     state, and fails closed with ``ValueError``.
 
     The fold is deterministic and side-effect-free: repeated calls without
-    intervening ``publish()`` calls return equal ``RunState`` values. M1
-    publishes at most one genesis ``RequestV1`` (the last one seen wins) and
-    ``workflow_revision`` holds the highest-sequence ``WorkflowRevisionV1``.
+    intervening ``publish()`` calls return equal ``RunState`` values. Each
+    kind's named field holds the parsed value of the highest-sequence
+    committed record of that kind.
     """
 
     run_dir = Path(state_dir) / "runs" / run_id
@@ -87,6 +109,10 @@ def replay(state_dir: str, run_id: str) -> RunState:
     workflow_revision: WorkflowRevisionV1 | None = None
     last_sequence = 0
     last_record_id: RecordRef | None = None
+    attempt_packet: AttemptPacketV1 | None = None
+    result_value: ResultV1 | None = None
+    verification: VerificationV1 | None = None
+    receipt: ReceiptV1 | None = None
 
     if not run_dir.is_dir():
         return RunState(
@@ -94,6 +120,10 @@ def replay(state_dir: str, run_id: str) -> RunState:
             workflow_revision=workflow_revision,
             last_sequence=last_sequence,
             last_record_id=last_record_id,
+            attempt_packet=attempt_packet,
+            result=result_value,
+            verification=verification,
+            receipt=receipt,
         )
 
     expected_sequence = 0
@@ -133,6 +163,14 @@ def replay(state_dir: str, run_id: str) -> RunState:
             request = value
         elif isinstance(value, WorkflowRevisionV1):
             workflow_revision = value
+        elif isinstance(value, AttemptPacketV1):
+            attempt_packet = value
+        elif isinstance(value, ResultV1):
+            result_value = value
+        elif isinstance(value, VerificationV1):
+            verification = value
+        elif isinstance(value, ReceiptV1):
+            receipt = value
         candidate = envelope["candidate"]
         last_sequence = sequence
         last_record_id = RecordRef(
@@ -146,4 +184,8 @@ def replay(state_dir: str, run_id: str) -> RunState:
         workflow_revision=workflow_revision,
         last_sequence=last_sequence,
         last_record_id=last_record_id,
+        attempt_packet=attempt_packet,
+        result=result_value,
+        verification=verification,
+        receipt=receipt,
     )

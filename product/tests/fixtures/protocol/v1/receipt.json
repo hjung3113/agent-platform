@@ -1,0 +1,13 @@
+{
+  "contract_kind": "receipt",
+  "protocol_version": 1,
+  "schema_version": 1,
+  "payload": {
+    "verification": {
+      "contract_kind": "verification",
+      "record_id": "rec-verification-0001",
+      "content_digest": "sha256:agent-platform-json-v1:be719e65fce9c95148cdc6f2328dd19af305069cbe0890f3554cbec3ba30f6af"
+    },
+    "receipt_type": "terminal"
+  }
+}

@@ -40,12 +40,17 @@ from kernel.protocol import (
     ParsedCandidate,
     ReaderOutcome,
     RecordRef,
+    read_candidate,
     verify_binding,
 )
 from kernel.protocol_v1 import (
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
+    AttemptPacketV1,
+    ReceiptV1,
     RequestV1,
+    ResultV1,
+    VerificationV1,
     WorkflowRevisionV1,
 )
 
@@ -53,6 +58,33 @@ _RECORD_FILENAME = re.compile(r"^(\d{10})\.json$")
 _RUN_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 _GENESIS_RECORD_FILENAME = "0000000001.json"
 _DEFAULT_LOCK_TIMEOUT_SECONDS = 5.0
+
+_NEXT_KIND: dict[ContractKind | None, ContractKind] = {
+    None: ContractKind.REQUEST,
+    ContractKind.REQUEST: ContractKind.WORKFLOW_REVISION,
+    ContractKind.WORKFLOW_REVISION: ContractKind.ATTEMPT_PACKET,
+    ContractKind.ATTEMPT_PACKET: ContractKind.RESULT,
+    ContractKind.RESULT: ContractKind.VERIFICATION,
+    ContractKind.VERIFICATION: ContractKind.RECEIPT,
+}
+
+
+def _next_kind(head_kind: str | None) -> ContractKind:
+    """Expected next contract kind after a run head of ``head_kind``.
+
+    ``None`` is the genesis state. A terminal Receipt head never reaches
+    this lookup: it is rejected as ``RUN_ALREADY_TERMINAL`` first.
+    """
+
+    if head_kind is None:
+        return _NEXT_KIND[None]
+    try:
+        key: ContractKind | None = ContractKind(head_kind)
+    except ValueError as error:
+        raise RuntimeError(
+            f"committed head contract kind unknown: {head_kind!r}"
+        ) from error
+    return _NEXT_KIND[key]
 
 
 class PublishRejectionCode(StrEnum):
@@ -68,6 +100,15 @@ class PublishRejectionCode(StrEnum):
         "idempotency_key_reused_with_different_content"
     )
     LOCK_CONTENTION_TIMEOUT = "lock_contention_timeout"
+    RUN_ALREADY_TERMINAL = "run_already_terminal"
+    ATTEMPT_TASK_BINDING_MISMATCH = "attempt_task_binding_mismatch"
+    RESULT_ATTEMPT_BINDING_MISMATCH = "result_attempt_binding_mismatch"
+    VERIFICATION_RESULT_BINDING_MISMATCH = (
+        "verification_result_binding_mismatch"
+    )
+    VERIFICATION_COVERAGE_MISMATCH = "verification_coverage_mismatch"
+    SELF_VERIFICATION_REJECTED = "self_verification_rejected"
+    RECEIPT_VERIFICATION_NOT_PASSED = "receipt_verification_not_passed"
 
 
 @dataclass(frozen=True)
@@ -97,8 +138,8 @@ def _candidate_content(
     The returned shape is both the digest input (identical to
     ``CandidateEnvelope.to_content_value()``) and the replayable candidate
     envelope stored on disk. For a bare ``ReaderOutcome`` from a registered
-    reader, the dispatch key is derived from the typed value; M1 publishes
-    only v1 Request and Workflow Revision candidates.
+    reader, the dispatch key is derived from the typed value; the v1
+    readers cover all six contract kinds.
     """
 
     if isinstance(candidate, ParsedCandidate):
@@ -108,6 +149,14 @@ def _candidate_content(
         contract_kind = ContractKind.REQUEST
     elif isinstance(value, WorkflowRevisionV1):
         contract_kind = ContractKind.WORKFLOW_REVISION
+    elif isinstance(value, AttemptPacketV1):
+        contract_kind = ContractKind.ATTEMPT_PACKET
+    elif isinstance(value, ResultV1):
+        contract_kind = ContractKind.RESULT
+    elif isinstance(value, VerificationV1):
+        contract_kind = ContractKind.VERIFICATION
+    elif isinstance(value, ReceiptV1):
+        contract_kind = ContractKind.RECEIPT
     else:
         raise TypeError(
             "unsupported candidate value type: " + type(value).__name__
@@ -161,6 +210,41 @@ def _record_ref_of(envelope: dict[str, Any]) -> RecordRef:
     )
 
 
+def _committed_contract(
+    run: RunHandle, contract_kind: ContractKind
+) -> tuple[RecordRef, Any]:
+    """Publication identity and typed payload of the run's record of a kind.
+
+    The linear chain holds at most one committed record of each contract
+    kind, so a scan that finds none or several means the run's state is
+    not what this boundary could have committed; both cases fail closed
+    with ``RuntimeError`` rather than guessing which record a candidate's
+    embedded reference must bind against.
+    """
+
+    envelope: dict[str, Any] | None = None
+    for committed in _committed_records(run):
+        if committed["candidate"]["contract_kind"] == contract_kind.value:
+            if envelope is not None:
+                raise RuntimeError(
+                    f"multiple committed {contract_kind.value} records: "
+                    f"{run.run_dir}"
+                )
+            envelope = committed
+    if envelope is None:
+        raise RuntimeError(
+            f"no committed {contract_kind.value} record: {run.run_dir}"
+        )
+    parsed = read_candidate(envelope["candidate"])
+    if not parsed.ok:
+        raise RuntimeError(
+            f"committed {contract_kind.value} record malformed: "
+            f"{parsed.rejection_code}:{parsed.reason}"
+        )
+    parsed_candidate: ParsedCandidate = parsed.value
+    return _record_ref_of(envelope), parsed_candidate.value
+
+
 def _find_idempotent_publish(
     run: RunHandle, idempotency_key: str, digest: str
 ) -> RecordRef | Rejected | None:
@@ -180,6 +264,104 @@ def _find_idempotent_publish(
             PublishRejectionCode.IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_CONTENT,
             f"idempotency_key_reused={idempotency_key}",
         )
+    return None
+
+
+def _kind_binding_rejection(
+    run: RunHandle, content: dict[str, Any], value: Any
+) -> Rejected | None:
+    """Explicit per-kind binding checks against actual prior records.
+
+    Predecessor-equals-head fencing already pins position; each kind's own
+    embedded reference is additionally verified against the actually-
+    published record of the kind it names — the same defense-in-depth M1
+    added for ``workflow_revision.request`` against the genesis Request.
+    Returns the typed rejection, or None when the candidate binds
+    correctly.
+    """
+
+    kind = content["contract_kind"]
+    if kind == ContractKind.WORKFLOW_REVISION.value:
+        binding = verify_binding(value.request, _genesis_record_ref(run))
+        if not binding.ok:
+            return Rejected(
+                PublishRejectionCode.GENESIS_REQUEST_BINDING_MISMATCH,
+                f"binding_failure={binding.rejection_code}:{binding.reason}",
+            )
+        return None
+    if kind == ContractKind.ATTEMPT_PACKET.value:
+        revision_ref, revision = _committed_contract(
+            run, ContractKind.WORKFLOW_REVISION
+        )
+        if value.task_id != revision.task.task_id:
+            return Rejected(
+                PublishRejectionCode.ATTEMPT_TASK_BINDING_MISMATCH,
+                f"task_id_expected={revision.task.task_id!r} "
+                f"actual={value.task_id!r}",
+            )
+        binding = verify_binding(value.workflow_revision, revision_ref)
+        if not binding.ok:
+            return Rejected(
+                PublishRejectionCode.ATTEMPT_TASK_BINDING_MISMATCH,
+                f"binding_failure={binding.rejection_code}:{binding.reason}",
+            )
+        return None
+    if kind == ContractKind.RESULT.value:
+        attempt_ref, _ = _committed_contract(run, ContractKind.ATTEMPT_PACKET)
+        binding = verify_binding(value.attempt, attempt_ref)
+        if not binding.ok:
+            return Rejected(
+                PublishRejectionCode.RESULT_ATTEMPT_BINDING_MISMATCH,
+                f"binding_failure={binding.rejection_code}:{binding.reason}",
+            )
+        return None
+    if kind == ContractKind.VERIFICATION.value:
+        result_ref, result_value = _committed_contract(run, ContractKind.RESULT)
+        binding = verify_binding(value.result, result_ref)
+        if not binding.ok:
+            return Rejected(
+                PublishRejectionCode.VERIFICATION_RESULT_BINDING_MISMATCH,
+                f"binding_failure={binding.rejection_code}:{binding.reason}",
+            )
+        _, revision = _committed_contract(run, ContractKind.WORKFLOW_REVISION)
+        covered = tuple(entry.criterion for entry in value.coverage)
+        if covered != revision.task.acceptance_criteria:
+            return Rejected(
+                PublishRejectionCode.VERIFICATION_COVERAGE_MISMATCH,
+                "coverage_criteria_dont_match_bound_workflow_revision",
+            )
+        for entry in value.coverage:
+            if (
+                entry.status == "SATISFIED"
+                and entry.evidence_digest != result_value.output_snapshot_digest
+            ):
+                return Rejected(
+                    PublishRejectionCode.VERIFICATION_COVERAGE_MISMATCH,
+                    f"evidence_digest_mismatch_criterion={entry.criterion!r}",
+                )
+        _, attempt_value = _committed_contract(run, ContractKind.ATTEMPT_PACKET)
+        if value.verifier_identity == attempt_value.implementer_identity:
+            return Rejected(
+                PublishRejectionCode.SELF_VERIFICATION_REJECTED,
+                f"verifier_identity={value.verifier_identity!r}",
+            )
+        return None
+    if kind == ContractKind.RECEIPT.value:
+        verification_ref, verification_value = _committed_contract(
+            run, ContractKind.VERIFICATION
+        )
+        binding = verify_binding(value.verification, verification_ref)
+        if not binding.ok:
+            return Rejected(
+                PublishRejectionCode.RECEIPT_VERIFICATION_NOT_PASSED,
+                f"binding_failure={binding.rejection_code}:{binding.reason}",
+            )
+        if verification_value.verdict != "PASS":
+            return Rejected(
+                PublishRejectionCode.RECEIPT_VERIFICATION_NOT_PASSED,
+                f"verification_verdict={verification_value.verdict}",
+            )
+        return None
     return None
 
 
@@ -257,10 +439,17 @@ def publish(
     ``candidate`` is the already-validated output of M0 reader dispatch:
     either the ``ParsedCandidate`` returned by ``read_candidate`` or the bare
     ``ReaderOutcome`` returned by a registered reader. Run shape is
-    enforced: a genesis publish (``run_id is None``) accepts only a
-    Request candidate and starts the run's sequence-1 record; every
-    non-genesis publish accepts only a Workflow Revision candidate whose
-    embedded ``request`` RecordRef binds to this run's genesis Request.
+    enforced by the linear chain Request -> Workflow Revision -> Attempt
+    Packet -> Result -> Verification -> Receipt: a genesis publish
+    (``run_id is None``) accepts only a Request candidate and starts the
+    run's sequence-1 record; each later publish must carry the contract
+    kind that follows the current head's kind and must bind, via its own
+    embedded reference, to the actually-published predecessor record of
+    the kind it names. Once a
+    terminal Receipt is committed the run is terminal: every further
+    publish rejects ``RUN_ALREADY_TERMINAL`` before any other admission
+    check, except a genuine idempotent retry, which still returns the
+    existing publication.
 
     Ordering is a correctness invariant: the admission decision, the durable
     commit, and the head-projection update all happen inside the run lock,
@@ -386,12 +575,27 @@ def _publish_locked(
     if idempotent is not None:
         return Published(record_ref=idempotent, run_id=run_id)
 
+    head_kind = (
+        None
+        if head is None
+        else head.last_record["candidate"]["contract_kind"]
+    )
+    if head_kind == ContractKind.RECEIPT.value:
+        return Rejected(
+            PublishRejectionCode.RUN_ALREADY_TERMINAL,
+            f"run_head_is_terminal_receipt={run_id}",
+        )
+
+    candidate_kind = content["contract_kind"]
+    expected_kind = _next_kind(head_kind)
+    if candidate_kind != expected_kind.value:
+        return Rejected(
+            PublishRejectionCode.INVALID_CANDIDATE_KIND_FOR_RUN_STATE,
+            f"expected_next={expected_kind.value} head={head_kind} "
+            f"actual={candidate_kind}",
+        )
+
     if not is_genesis:
-        if content["contract_kind"] != ContractKind.WORKFLOW_REVISION.value:
-            return Rejected(
-                PublishRejectionCode.INVALID_CANDIDATE_KIND_FOR_RUN_STATE,
-                "run_requires_workflow_revision_candidate",
-            )
         actual = _record_ref_of(head.last_record)
         if (
             expected_predecessor is None
@@ -401,14 +605,10 @@ def _publish_locked(
                 PublishRejectionCode.PREDECESSOR_MISMATCH,
                 f"expected={expected_predecessor!r} actual={actual!r}",
             )
-        revision_value = candidate.value
-        genesis_ref = _genesis_record_ref(run)
-        binding = verify_binding(revision_value.request, genesis_ref)
-        if not binding.ok:
-            return Rejected(
-                PublishRejectionCode.GENESIS_REQUEST_BINDING_MISMATCH,
-                f"binding_failure={binding.rejection_code}:{binding.reason}",
-            )
+
+    binding_rejection = _kind_binding_rejection(run, content, candidate.value)
+    if binding_rejection is not None:
+        return binding_rejection
 
     sequence = 1 if head is None else head.last_sequence + 1
     record_id = f"{run_id}:{sequence:010d}"
