@@ -16,8 +16,10 @@ Modes:
   not inherited. If the workdir contains a ``fake-opencode-directive.txt``
   whose content is exactly ``noop``, nothing is written and the run only
   prints a success line — used to prove Result completion is derived from
-  workspace snapshot identity, not from stdout or exit code. Any other
-  directive content exits 2 rather than improvising behavior.
+  workspace snapshot identity, not from stdout or exit code. A directive whose
+  content is exactly ``stdout-canary`` prints a synthetic AWS-key-shaped canary
+  to stdout. Any other directive content exits 2 rather than improvising
+  behavior.
 """
 
 import json
@@ -29,6 +31,7 @@ VERSION = "fake-opencode 1.2.3"
 REPORT_NAME = "fake-opencode-report.json"
 DIRECTIVE_NAME = "fake-opencode-directive.txt"
 SENTINEL_VARIABLE = "SENTINEL_SECRET"
+REDACTION_CANARY = "AKIAABCDEFGHIJKLMNOP"
 
 
 def _version() -> int:
@@ -51,6 +54,9 @@ def _run(arguments: list[str]) -> int:
         content = directive.read_text(encoding="utf-8").strip()
         if content == "noop":
             print("opencode: success (no-op)")
+            return 0
+        if content == "stdout-canary":
+            print(f"opencode: synthetic canary {REDACTION_CANARY}")
             return 0
         print(f"fake-opencode: unknown directive: {content!r}", file=sys.stderr)
         return 2

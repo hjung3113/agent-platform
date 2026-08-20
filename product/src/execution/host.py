@@ -37,6 +37,7 @@ from kernel.runtime_capability import RuntimeCapabilityProfile
 
 from execution import policy
 from execution.opencode_adapter import probe_opencode_profile
+from execution.redaction import scan_for_retention
 from execution.workspace_snapshot import snapshot_identity
 
 
@@ -50,6 +51,10 @@ class StaleRuntimeCapabilityProfileError(Exception):
 
 class RuntimeSubstitutionRejectedError(Exception):
     """Pre-spawn recheck (plan §6 step 3.5) found binary or profile drift."""
+
+
+class RetentionBlockedError(Exception):
+    """Captured output failed the pre-retention redaction gate."""
 
 
 class AdmissionRejectedError(Exception):
@@ -149,6 +154,8 @@ def execute(
     opencode_binary_path: str,
     config_paths: tuple[Path, ...] = (),
     declared_generated_paths: tuple[str, ...] = (),
+    *,
+    retain_evidence: bool = False,
 ) -> ResultV1:
     """Execute one Attempt inside the deny-first M3 envelope (plan §6).
 
@@ -200,7 +207,7 @@ def execute(
         profile=profile,
     )
 
-    subprocess.run(
+    completed = subprocess.run(
         [str(resolved_binary), "run", "--workdir", str(resolved_root)],
         cwd=resolved_root,
         env=_child_environment(),
@@ -208,6 +215,19 @@ def execute(
         text=True,
         check=False,
     )
+
+    if retain_evidence:
+        scan_results = (
+            ("stdout", scan_for_retention(completed.stdout)),
+            ("stderr", scan_for_retention(completed.stderr)),
+        )
+        blocked_streams = [
+            f"{stream} scan status={result.status}"
+            for stream, result in scan_results
+            if result.status != "passed"
+        ]
+        if blocked_streams:
+            raise RetentionBlockedError("; ".join(blocked_streams))
 
     output_snapshot_digest = snapshot_identity(
         workspace_root, declared_generated_paths

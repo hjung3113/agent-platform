@@ -15,6 +15,7 @@ from kernel.protocol_v1 import AttemptPacketV1, read_result_v1
 from execution import host, policy
 from execution.host import (
     AdmissionRejectedError,
+    RetentionBlockedError,
     RuntimeSubstitutionRejectedError,
     StaleRuntimeCapabilityProfileError,
     StaleWorkspaceSnapshotError,
@@ -376,6 +377,47 @@ class HostExecuteTest(unittest.TestCase):
         self.assertFalse(
             (Path(self._temporary_directory.name) / "outside.txt").exists()
         )
+
+    def test_canary_stdout_does_not_block_default_nonretained_execution(self) -> None:
+        (self.root / DIRECTIVE_NAME).write_text("stdout-canary", encoding="utf-8")
+        attempt = self._build_attempt()
+
+        with self._no_required_capabilities():
+            result = execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY))
+
+        self.assertEqual(result.attempt, ATTEMPT_REF)
+
+    def test_canary_stdout_blocks_retained_execution(self) -> None:
+        (self.root / DIRECTIVE_NAME).write_text("stdout-canary", encoding="utf-8")
+        attempt = self._build_attempt()
+
+        with self._no_required_capabilities():
+            with self.assertRaises(RetentionBlockedError) as raised:
+                execute(
+                    ATTEMPT_REF,
+                    attempt,
+                    self.root,
+                    str(FIXTURE_BINARY),
+                    retain_evidence=True,
+                )
+
+        self.assertEqual(str(raised.exception), "stdout scan status=blocked")
+        self.assertNotIn("AKIAABCDEFGHIJKLMNOP", str(raised.exception))
+
+    def test_ordinary_stdout_allows_retained_execution(self) -> None:
+        attempt = self._build_attempt()
+
+        with self._no_required_capabilities():
+            result = execute(
+                ATTEMPT_REF,
+                attempt,
+                self.root,
+                str(FIXTURE_BINARY),
+                retain_evidence=True,
+            )
+
+        self.assertEqual(result.attempt, ATTEMPT_REF)
+        self.assertTrue(self._spawned_report().is_file())
 
 
 if __name__ == "__main__":
