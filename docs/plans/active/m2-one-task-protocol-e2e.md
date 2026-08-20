@@ -117,6 +117,12 @@ observation:                      # embedded Runtime Observation, not a separate
   output_snapshot_digest: str      # must equal the sibling field above (Result/Observation binding)
 ```
 
+`observation.output_snapshot_digest == output_snapshot_digest` is a **reader-level**
+`MALFORMED_PAYLOAD` check: it is entirely payload-local (both fields live in the same
+candidate), so it belongs in `protocol_v1.py`, not in a publish rejection code. Only
+`result.attempt`'s binding to the actually-published Attempt Packet is lineage-aware and
+therefore a publish-level check (§4).
+
 ### `VerificationV1`
 
 ```text
@@ -125,19 +131,62 @@ verifier_identity: str            # must differ from the Attempt's implementer_i
 coverage:                          # one entry per Workflow Revision task.acceptance_criteria item, same order
   - criterion: str
     status: "SATISFIED" | "UNSATISFIED" | "BLOCKED" | "UNPROVEN"
-verdict: "PASS" | "FAIL" | "BLOCKED"   # PASS iff every coverage entry is SATISFIED
+    evidence_digest: str | null    # required, content-digest-shaped, when status == SATISFIED; null otherwise
+verdict: "PASS" | "FAIL" | "BLOCKED"   # total function of coverage, see rule below
 findings: tuple[str, ...]          # free-text reasons; non-empty only when verdict != PASS
 ```
 
-`coverage` length/criterion-text mismatch against the bound Workflow Revision's
-`task.acceptance_criteria` is a reader-level `MALFORMED_PAYLOAD` rejection — this is where
-"missing evidence fails closed" is enforced, not a publish-level check.
+`evidence_digest` is the minimal evidence binding M2 carries: for a `SATISFIED` entry it
+must equal the bound Result's `output_snapshot_digest` (checked at the publish boundary,
+§4) — coverage completeness is not evidence completeness, so a `SATISFIED` status with no
+matching evidence reference must not be constructible. This does not add a real evidence
+policy (composite sources, freshness, admissibility tiers stay M5) — it is the smallest
+binding that prevents `PASS` from assertion alone.
+
+`verdict` is a **total, reader-enforced function of `coverage`** — the reader recomputes it
+and rejects (`MALFORMED_PAYLOAD`) if the declared value differs:
+
+1. `PASS` iff `coverage` is non-empty and every entry is `SATISFIED` (with `evidence_digest`
+   set).
+2. else `BLOCKED` iff any entry is `BLOCKED`.
+3. else `FAIL` (covers any `UNSATISFIED`/`UNPROVEN` mix with no `BLOCKED` entry).
+
+Reader-level checks (payload-local, no lineage): `coverage` non-empty; each `status` in the
+four-value enum; `evidence_digest` present and content-digest-shaped iff `status ==
+SATISFIED`, else null; declared `verdict` matches the computed function above.
+
+Publish-level checks (lineage-aware, §4): `coverage`'s criterion list matches — same
+length, text, and order as — the bound Workflow Revision's `task.acceptance_criteria`; each
+`SATISFIED` entry's `evidence_digest` equals the bound Result's `output_snapshot_digest`;
+`verification.result` binds to the actually-published Result.
+
+An empty `task.acceptance_criteria` cannot occur upstream: `protocol_v1.py`'s existing
+`_read_task_v1` already requires it non-empty (`allow_empty=False`), so the vacuous-PASS
+case (`all([])`) this plan would otherwise risk is closed by that existing M0 invariant,
+not by anything new here. `coverage` is still independently required non-empty at the
+reader level as defense-in-depth against a payload that omits the field's shape guarantee.
+
+**Deferred, not fixed here:** `verifier_identity`/`implementer_identity` are opaque
+caller-supplied strings; self-verification is closed by string inequality only, not by a
+distinct, independently-bound execution/attempt identity. Spec 06 asks for the latter
+("independence requires a distinct attempt/execution identity, not a role/profile switch")
+but that is issue #34's M5 bullet ("execution-provenance independence"), not M2. M2 proves
+protocol wiring — that a self-verification *attempt* fails closed — not real execution
+independence.
 
 ### `ReceiptV1`
 
 ```text
 verification: RecordRef           # binds to this run's published Verification; must be PASS
+receipt_type: "terminal"          # literal; only value M2 accepts
 ```
+
+Spec 03 requires every Receipt to carry an explicit checkpoint-or-terminal discriminator;
+only a terminal Receipt ends a run. M2 never produces a checkpoint Receipt (checkpoint,
+retry, repair, replan are all out of scope, §2), but the field exists now so the schema
+does not have to change shape when a checkpoint variant is introduced later — the reader
+rejects any `receipt_type` other than `"terminal"` as `MALFORMED_PAYLOAD` in M2.
+`replay.py`'s terminal detection (§5) reads this field, not mere record presence.
 
 ## 4. `publish.py` state machine generalization
 
@@ -169,12 +218,18 @@ via `verify_binding` against the actual prior record.
 
 New `PublishRejectionCode` entries:
 
-- `RUN_ALREADY_TERMINAL` — any publish attempted against a run whose head is a Receipt.
+- `RUN_ALREADY_TERMINAL` — any publish attempted against a run whose head is a terminal
+  Receipt.
 - `ATTEMPT_TASK_BINDING_MISMATCH` — `attempt_packet.task_id` != the run's Workflow
   Revision `task.task_id`, or `attempt_packet.workflow_revision` fails `verify_binding`.
-- `RESULT_ATTEMPT_BINDING_MISMATCH` — `result.attempt` fails `verify_binding`, or
-  `result.observation.output_snapshot_digest` != `result.output_snapshot_digest`.
-- `VERIFICATION_RESULT_BINDING_MISMATCH` — `verification.result` fails `verify_binding`.
+- `RESULT_ATTEMPT_BINDING_MISMATCH` — `result.attempt` fails `verify_binding` against the
+  actually-published Attempt Packet. (The `observation`/`output_snapshot_digest`
+  self-consistency check is reader-level, §3 — not this code.)
+- `VERIFICATION_RESULT_BINDING_MISMATCH` — `verification.result` fails `verify_binding`
+  against the actually-published Result.
+- `VERIFICATION_COVERAGE_MISMATCH` — `coverage`'s criterion list doesn't match — length,
+  text, or order — the bound Workflow Revision's `task.acceptance_criteria`, or a
+  `SATISFIED` entry's `evidence_digest` != the bound Result's `output_snapshot_digest`.
 - `SELF_VERIFICATION_REJECTED` — `verification.verifier_identity` ==
   the run's Attempt Packet `implementer_identity`.
 - `RECEIPT_VERIFICATION_NOT_PASSED` — a Receipt candidate is published while the run's
@@ -194,34 +249,59 @@ kinds, including a duplicate terminal Receipt retry.
 
 Extend `RunState` to carry all six optional fields plus `last_sequence`/`last_record_id`,
 same reduction pattern as M1 (fold committed records in sequence order, independent of
-`_head.json`). Add a `terminal: bool` derived property (`receipt is not None`). No change
-to the fault-injection proof shape — `commit_barrier` behavior is orthogonal to which kind
-is being committed.
+`_head.json`). Add a `terminal: bool` derived property keyed off
+`receipt.receipt_type == "terminal"` (not mere `receipt is not None` — the field exists
+precisely so this stays correct once a checkpoint variant is introduced, §3). No change to
+the fault-injection proof shape — `commit_barrier` behavior is orthogonal to which kind is
+being committed.
 
 ## 6. Stub Host and stub Verifier
 
+Every builder below takes the **published `RecordRef`** for the record it binds to — the
+identity `publish()` actually returned, not the candidate payload object that was published.
+A payload object carries no Kernel-assigned `record_id`/`content_digest`, so it cannot fill
+a contract's own `RecordRef` binding field; only the driver that already called `publish()`
+and holds its `Published.record_ref` can. Content the new payload needs beyond that
+identity (e.g. exact criterion text) is passed as the typed value the driver already holds
+from `replay()` or its own construction — never fabricated inside the stub.
+
 ### `product/src/execution/attempt.py`
 
-`build_attempt_packet(workflow_revision, implementer_identity) -> AttemptPacketV1` —
-constructs the fixture-level identity fields deterministically (e.g. digests of fixed
-constants scoped by `workflow_revision`'s task_id); no real context compilation or
-workspace inspection.
+`build_attempt_packet(workflow_revision_ref: RecordRef, task_id: str, implementer_identity:
+str) -> AttemptPacketV1` — `workflow_revision_ref` is the `Published.record_ref` from
+publishing the Workflow Revision. Constructs the fixture-level identity fields
+deterministically (e.g. digests of fixed constants scoped by `task_id`); no real context
+compilation or workspace inspection.
 
 ### `product/src/execution/stub_host.py`
 
-`stub_execute(attempt) -> ResultV1` — deterministically derives an output snapshot digest
-from the Attempt (no process/subprocess/network execution); this is the explicit fake Host
-identity the M2 gate requires. May call `kernel.admission.admit_attempt` for its pure
-policy check as a demonstration of the seam, but M2 does not require real enforcement at
-this boundary — that is M3.
+`stub_execute(attempt_ref: RecordRef) -> ResultV1` — `attempt_ref` is the `Published.
+record_ref` from publishing the Attempt Packet. Deterministically derives an output
+snapshot digest as a pure function of `attempt_ref.content_digest` (no process/subprocess/
+network execution, no need to re-read the Attempt Packet's own fields); this is the
+explicit fake Host identity the M2 gate requires. May call `kernel.admission.admit_attempt`
+for its pure policy check as a demonstration of the seam, but M2 does not require real
+enforcement at this boundary — that is M3.
 
 ### `product/src/verification/stub_verifier.py`
 
-`stub_verify(result, workflow_revision, verifier_identity, expected_output_digest) ->
-VerificationV1` — builds the `coverage` array by comparing `result.output_snapshot_digest`
-against `expected_output_digest` (a test-fixture constant) via plain string equality for
-every `task.acceptance_criteria` entry; no semantic judgement. `verdict` is the pure
-function of `coverage` (`PASS` iff all `SATISFIED`).
+`stub_verify(result_ref: RecordRef, result_output_snapshot_digest: str, task: TaskV1,
+verifier_identity: str, expected_output_digest: str) -> VerificationV1` — `result_ref` is
+the `Published.record_ref` from publishing the Result; `result_output_snapshot_digest` is
+that Result's own `output_snapshot_digest` field value (the driver already has it, having
+just published the Result) and becomes each `SATISFIED` entry's `evidence_digest`; `task`
+is the typed `WorkflowRevisionV1.task` the driver already holds, supplying exact criterion
+text/order. Builds `coverage` by comparing `result_output_snapshot_digest` against
+`expected_output_digest` (a test-fixture constant) via plain digest equality for every
+`task.acceptance_criteria` entry; no semantic judgement. `verdict` is the total function of
+`coverage` defined in §3.
+
+### Receipt construction
+
+`build_receipt(verification_ref: RecordRef) -> ReceiptV1` — `verification_ref` is the
+`Published.record_ref` from publishing the Verification; sets `receipt_type="terminal"`.
+The driver should only call this after observing `verdict == PASS`, but `publish()` is the
+source of truth and rejects `RECEIPT_VERIFICATION_NOT_PASSED` regardless.
 
 ## 7. Test plan
 
@@ -230,9 +310,13 @@ function of `coverage` (`PASS` iff all `SATISFIED`).
 - golden `AttemptPacketV1`/`ResultV1`/`VerificationV1`/`ReceiptV1` round-trip + canonical
   digest determinism, mirroring existing `test_protocol_v1.py`/`test_protocol_golden.py`
   patterns.
-- negative: malformed payload keys, `coverage` length/criterion mismatch against a fixture
-  Workflow Revision, `verdict` inconsistent with `coverage` (reader must reject, not trust
-  caller-declared verdict against computed coverage).
+- negative (payload-local, reader-level only): malformed payload keys;
+  `result.observation.output_snapshot_digest` != `result.output_snapshot_digest`; empty
+  `coverage`; `evidence_digest` set when `status != SATISFIED` or missing/malformed when
+  `status == SATISFIED`; declared `verdict` inconsistent with the total function of
+  `coverage` (§3); `receipt_type` != `"terminal"`.
+- explicitly **not** a reader test: `coverage` vs. bound Workflow Revision
+  `acceptance_criteria` — that is lineage-aware and belongs to the publish boundary below.
 
 ### Publish boundary (`product/tests/kernel/`)
 
@@ -241,9 +325,11 @@ function of `coverage` (`PASS` iff all `SATISFIED`).
 - stale/conflicting predecessor at each of the four new steps rejects `PREDECESSOR_MISMATCH`
   (carrying forward the M1 pattern, not a new mechanism).
 - `attempt_packet.task_id` mismatch rejects `ATTEMPT_TASK_BINDING_MISMATCH`.
-- `result.attempt` binding mismatch and `result`/`observation` digest mismatch reject
-  `RESULT_ATTEMPT_BINDING_MISMATCH`.
+- `result.attempt` binding mismatch rejects `RESULT_ATTEMPT_BINDING_MISMATCH`.
 - `verification.result` binding mismatch rejects `VERIFICATION_RESULT_BINDING_MISMATCH`.
+- `coverage` criterion list mismatched against the bound Workflow Revision's
+  `acceptance_criteria`, and a `SATISFIED` entry's `evidence_digest` not equal to the bound
+  Result's `output_snapshot_digest`, each reject `VERIFICATION_COVERAGE_MISMATCH`.
 - `verification.verifier_identity == attempt.implementer_identity` rejects
   `SELF_VERIFICATION_REJECTED`.
 - Receipt publish while Verification `verdict` != `PASS` rejects
@@ -317,17 +403,24 @@ M2 may be checked in Issue #34 only when all are true:
   -> Receipt` passes end to end through the real `publish()` boundary for one task.
 - Stale/conflicting predecessor at any of the six steps fails closed.
 - Self-verification (`verifier_identity == implementer_identity`) fails closed.
-- Missing/malformed evidence (`coverage` shape mismatch against acceptance criteria) fails
-  closed at the reader boundary.
+- Missing/malformed evidence fails closed at the correct boundary: payload-shape defects
+  (empty `coverage`, missing/misplaced `evidence_digest`, `verdict` not the total function
+  of `coverage`) reject at the reader; lineage defects (`coverage` vs. bound Workflow
+  Revision `acceptance_criteria`, or a `SATISFIED` entry's `evidence_digest` not equal to
+  the bound Result's `output_snapshot_digest`) reject `VERIFICATION_COVERAGE_MISMATCH` at
+  publish. A `SATISFIED` coverage entry can never exist without a matching evidence
+  reference — `PASS` cannot be reached from assertion alone.
 - Duplicate terminal Receipt publication is idempotent on matching content, rejects on
   conflicting content, and any further publish against a terminal run rejects
   `RUN_ALREADY_TERMINAL`.
 - A `FAIL`/`BLOCKED` Verification publishes as an authoritative record but produces no
   Receipt, and a Receipt candidate against a non-PASS Verification rejects
-  `RECEIPT_VERIFICATION_NOT_PASSED`.
+  `RECEIPT_VERIFICATION_NOT_PASSED`. Every published Receipt carries `receipt_type ==
+  "terminal"`; no other value is accepted in M2.
 - All M0/M1 regression suites remain green.
 - No real Host isolation, real Workspace Snapshot, Context Compiler, DAG/retry/repair/
-  replan/parallelism, durable Finding lifecycle, or Reviewer/Verifier split was introduced.
+  replan/parallelism, durable Finding lifecycle, real execution-provenance-independent
+  Verifier identity, or Reviewer/Verifier split was introduced.
 
 After merge, attach the PR(s) and test evidence to Issue #34 before checking M2.
 
