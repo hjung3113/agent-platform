@@ -7,6 +7,7 @@ races. Durable authorization consumption belongs to the authoritative Kernel pat
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
@@ -86,9 +87,44 @@ def _blocked(reason: str) -> AdmissionResult:
     return AdmissionResult(AdmissionStatus.BLOCKED, reason)
 
 
+_MAX_SYMLINK_HOPS = 40
+
+
+def _has_symlink_loop(path: Path) -> bool:
+    """Bounded, explicit symlink-loop detection independent of ``Path.resolve``.
+
+    ``Path.resolve(strict=False)``'s symlink-loop behavior is not guaranteed
+    identical across Python versions/platforms (PR review flagged a
+    self-referential candidate path as a case worth defense-in-depth on,
+    beyond trusting the stdlib implementation alone). Walks the leaf
+    component's own symlink chain, following relative/absolute targets, and
+    fails closed on a revisited link or an excessively long chain.
+    """
+
+    current = path
+    seen: set[Path] = set()
+    hops = 0
+    while os.path.islink(current):
+        if current in seen:
+            return True
+        seen.add(current)
+        hops += 1
+        if hops > _MAX_SYMLINK_HOPS:
+            return True
+        try:
+            target = os.readlink(current)
+        except OSError:
+            return True
+        target_path = Path(target)
+        current = target_path if target_path.is_absolute() else (current.parent / target_path)
+    return False
+
+
 def _resolve_inside(root: Path, candidate: Path) -> Path | None:
     """Resolve a candidate and return it only when it remains under root."""
 
+    if _has_symlink_loop(candidate):
+        return None
     try:
         resolved_candidate = candidate.resolve(strict=False)
         resolved_candidate.relative_to(root)
