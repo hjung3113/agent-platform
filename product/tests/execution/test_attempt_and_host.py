@@ -5,22 +5,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kernel.canonical import content_digest
 from kernel.protocol import ContractKind, RecordRef
 from kernel.protocol_v1 import (
     ReceiptV1,
-    ResultV1,
-    RuntimeObservationV1,
     attempt_packet_v1_content_digest,
     read_attempt_packet_v1,
     read_receipt_v1,
-    read_result_v1,
     receipt_v1_content_digest,
-    result_v1_content_digest,
 )
 from execution.attempt import _fixture_digest, build_attempt_packet, build_receipt
 from execution.opencode_adapter import probe_opencode_profile
-from execution.stub_host import stub_execute
 from execution.workspace_snapshot import snapshot_identity
 
 FIXTURE_BINARY = (
@@ -32,12 +26,6 @@ WORKFLOW_REVISION_REF = RecordRef(
     record_id="wr_1",
     content_digest="sha256:agent-platform-json-v1:" + "a" * 64,
 )
-ATTEMPT_REF = RecordRef(
-    contract_kind=ContractKind.ATTEMPT_PACKET.value,
-    record_id="ap_1",
-    content_digest="sha256:agent-platform-json-v1:" + "b" * 64,
-)
-
 
 class BuildAttemptPacketTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -114,46 +102,6 @@ class BuildAttemptPacketTest(unittest.TestCase):
             attempt_packet_v1_content_digest(first),
             attempt_packet_v1_content_digest(second),
         )
-
-
-class StubExecuteTest(unittest.TestCase):
-    def test_result_binds_attempt_ref_and_observation_digest_matches(self) -> None:
-        result = stub_execute(ATTEMPT_REF)
-        self.assertEqual(result.attempt, ATTEMPT_REF)
-        self.assertEqual(
-            result.observation.output_snapshot_digest, result.output_snapshot_digest
-        )
-
-    def test_output_digest_is_pure_function_of_attempt_content_digest(self) -> None:
-        expected = content_digest(
-            {"fixture": "m2-stub-host", "attempt_content_digest": ATTEMPT_REF.content_digest}
-        )
-        result = stub_execute(ATTEMPT_REF)
-        self.assertEqual(result.output_snapshot_digest, expected)
-
-    def test_deterministic_across_repeated_calls(self) -> None:
-        first = stub_execute(ATTEMPT_REF)
-        second = stub_execute(ATTEMPT_REF)
-        self.assertEqual(first, second)
-        self.assertEqual(
-            result_v1_content_digest(first), result_v1_content_digest(second)
-        )
-
-    def test_distinct_attempt_content_produces_distinct_output(self) -> None:
-        other_ref = RecordRef(
-            contract_kind=ContractKind.ATTEMPT_PACKET.value,
-            record_id="ap_2",
-            content_digest="sha256:agent-platform-json-v1:" + "c" * 64,
-        )
-        self.assertNotEqual(
-            stub_execute(ATTEMPT_REF).output_snapshot_digest,
-            stub_execute(other_ref).output_snapshot_digest,
-        )
-
-    def test_result_reads_back_through_strict_reader(self) -> None:
-        result = stub_execute(ATTEMPT_REF)
-        outcome = read_result_v1(result.to_canonical_value())
-        self.assertEqual(outcome.value, result)
 
 
 class BuildReceiptTest(unittest.TestCase):
