@@ -60,6 +60,10 @@ _HEX_DIGITS = frozenset("0123456789abcdef")
 class ContractKind(StrEnum):
     REQUEST = "request"
     WORKFLOW_REVISION = "workflow_revision"
+    ATTEMPT_PACKET = "attempt_packet"
+    RESULT = "result"
+    VERIFICATION = "verification"
+    RECEIPT = "receipt"
 
 
 class ProtocolRejectionCode(StrEnum):

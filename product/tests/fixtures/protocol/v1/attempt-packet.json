@@ -1,0 +1,17 @@
+{
+  "contract_kind": "attempt_packet",
+  "protocol_version": 1,
+  "schema_version": 1,
+  "payload": {
+    "workflow_revision": {
+      "contract_kind": "workflow_revision",
+      "record_id": "rec-workflow-0001",
+      "content_digest": "sha256:agent-platform-json-v1:3bdbe2489c5fce7cf1964fed6668a22556c31afc6057419b725ec46273bfbdc2"
+    },
+    "task_id": "task-m0-1",
+    "implementer_identity": "stub-implementer-m2",
+    "context_digest": "sha256:agent-platform-json-v1:c7ca745a4bd9382d5c8fb627bb22580239e5c14dd1292804213ceb921bcd92c1",
+    "workspace_snapshot_digest": "sha256:agent-platform-json-v1:e16db037559fa81df90646639d77350458ae37c986cb4baf1800401e54edf9f4",
+    "runtime_capability_profile_identity": "runtime-profile:stub-host-m2:v1"
+  }
+}

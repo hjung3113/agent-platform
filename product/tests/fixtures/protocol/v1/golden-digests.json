@@ -6,5 +6,21 @@
   "workflow_revision": {
     "canonical_json": "{\"contract_kind\":\"workflow_revision\",\"payload\":{\"request\":{\"content_digest\":\"sha256:agent-platform-json-v1:10433089bff3b518472003861531f9ddf2edceb2da0d6f5d56d96f63f4fe213c\",\"contract_kind\":\"request\",\"record_id\":\"rec-request-0001\"},\"task\":{\"acceptance_criteria\":[\"Every unsupported contract, protocol, or schema combination rejects\",\"Golden canonical bytes and digests stay fixed\"],\"objective\":\"Land the M0 protocol foundation slice\",\"task_id\":\"task-m0-1\"}},\"protocol_version\":1,\"schema_version\":1}",
     "content_digest": "sha256:agent-platform-json-v1:3bdbe2489c5fce7cf1964fed6668a22556c31afc6057419b725ec46273bfbdc2"
+  },
+  "attempt_packet": {
+    "canonical_json": "{\"contract_kind\":\"attempt_packet\",\"payload\":{\"context_digest\":\"sha256:agent-platform-json-v1:c7ca745a4bd9382d5c8fb627bb22580239e5c14dd1292804213ceb921bcd92c1\",\"implementer_identity\":\"stub-implementer-m2\",\"runtime_capability_profile_identity\":\"runtime-profile:stub-host-m2:v1\",\"task_id\":\"task-m0-1\",\"workflow_revision\":{\"content_digest\":\"sha256:agent-platform-json-v1:3bdbe2489c5fce7cf1964fed6668a22556c31afc6057419b725ec46273bfbdc2\",\"contract_kind\":\"workflow_revision\",\"record_id\":\"rec-workflow-0001\"},\"workspace_snapshot_digest\":\"sha256:agent-platform-json-v1:e16db037559fa81df90646639d77350458ae37c986cb4baf1800401e54edf9f4\"},\"protocol_version\":1,\"schema_version\":1}",
+    "content_digest": "sha256:agent-platform-json-v1:f9843145310f3c1ab01d6d70dc456df1cff65b8251c8bfe58a3dd2439f477b2e"
+  },
+  "result": {
+    "canonical_json": "{\"contract_kind\":\"result\",\"payload\":{\"attempt\":{\"content_digest\":\"sha256:agent-platform-json-v1:f9843145310f3c1ab01d6d70dc456df1cff65b8251c8bfe58a3dd2439f477b2e\",\"contract_kind\":\"attempt_packet\",\"record_id\":\"rec-attempt-0001\"},\"observation\":{\"output_snapshot_digest\":\"sha256:agent-platform-json-v1:162495ee90155423030f305bc49c79851391e2d3d8b7180cea2f9ab592c3a1ad\",\"runtime_identity\":\"stub-host-m2\"},\"output_snapshot_digest\":\"sha256:agent-platform-json-v1:162495ee90155423030f305bc49c79851391e2d3d8b7180cea2f9ab592c3a1ad\"},\"protocol_version\":1,\"schema_version\":1}",
+    "content_digest": "sha256:agent-platform-json-v1:19ab5e0a4db061e0d49006c331f78f17cafe25b7064bd2eac69074d7a8aca923"
+  },
+  "verification": {
+    "canonical_json": "{\"contract_kind\":\"verification\",\"payload\":{\"coverage\":[{\"criterion\":\"Every unsupported contract, protocol, or schema combination rejects\",\"evidence_digest\":\"sha256:agent-platform-json-v1:162495ee90155423030f305bc49c79851391e2d3d8b7180cea2f9ab592c3a1ad\",\"status\":\"SATISFIED\"},{\"criterion\":\"Golden canonical bytes and digests stay fixed\",\"evidence_digest\":\"sha256:agent-platform-json-v1:162495ee90155423030f305bc49c79851391e2d3d8b7180cea2f9ab592c3a1ad\",\"status\":\"SATISFIED\"}],\"findings\":[],\"result\":{\"content_digest\":\"sha256:agent-platform-json-v1:19ab5e0a4db061e0d49006c331f78f17cafe25b7064bd2eac69074d7a8aca923\",\"contract_kind\":\"result\",\"record_id\":\"rec-result-0001\"},\"verdict\":\"PASS\",\"verifier_identity\":\"stub-verifier-m2\"},\"protocol_version\":1,\"schema_version\":1}",
+    "content_digest": "sha256:agent-platform-json-v1:be719e65fce9c95148cdc6f2328dd19af305069cbe0890f3554cbec3ba30f6af"
+  },
+  "receipt": {
+    "canonical_json": "{\"contract_kind\":\"receipt\",\"payload\":{\"receipt_type\":\"terminal\",\"verification\":{\"content_digest\":\"sha256:agent-platform-json-v1:be719e65fce9c95148cdc6f2328dd19af305069cbe0890f3554cbec3ba30f6af\",\"contract_kind\":\"verification\",\"record_id\":\"rec-verification-0001\"}},\"protocol_version\":1,\"schema_version\":1}",
+    "content_digest": "sha256:agent-platform-json-v1:1ccba256402494a5406155a690d622f75464a57b304ff592ef57d2d093a3287f"
   }
 }
