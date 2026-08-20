@@ -12,7 +12,7 @@ from kernel.runtime_capability import (
     RuntimeCapabilityProfile,
 )
 from execution import policy
-from execution.opencode_adapter import probe_opencode_profile
+from execution.opencode_adapter import CANONICAL_ACTION_TOOL_MAPPING, probe_opencode_profile
 
 FIXTURE_BINARY = (
     Path(__file__).resolve().parent / "fixtures" / "fake_opencode" / "fake_opencode.py"
@@ -125,10 +125,17 @@ class ProbeOpencodeProfileTest(unittest.TestCase):
             self.assertEqual(statuses.get(name), CapabilityStatus.PARTIAL, name)
             self.assertNotEqual(statuses.get(name), CapabilityStatus.SUPPORTED, name)
 
-    def test_declared_capabilities_match_m3_required_names(self) -> None:
+    def test_declared_capabilities_match_adapter_tool_mapping(self) -> None:
+        """The adapter declares exactly its own mapped canonical actions.
+
+        These are independent of ``policy.M3_REQUIRED_CAPABILITIES``, which
+        is empty by design (plan §5.1, orchestrator-level fix): the adapter
+        can only ever mark these PARTIAL, so M3 does not require() them.
+        """
+
         profile = probe_opencode_profile(str(FIXTURE_BINARY))
         declared = {capability.name for capability in profile.capabilities}
-        self.assertEqual(declared, set(policy.M3_REQUIRED_CAPABILITIES))
+        self.assertEqual(declared, set(CANONICAL_ACTION_TOOL_MAPPING))
 
     def test_require_unmapped_action_fails_closed(self) -> None:
         profile = probe_opencode_profile(str(FIXTURE_BINARY))

@@ -219,29 +219,27 @@ class HostExecuteTest(unittest.TestCase):
         self.assertEqual(raised.exception.reason, "required_capabilities_not_satisfied")
         self.assertFalse(self._spawned_report().exists())
 
-    def test_committed_policy_table_fails_closed_against_live_profile(self) -> None:
-        """Honest lock-in of the committed PR3a+PR3b composition.
+    def test_committed_policy_table_admits_the_live_profile(self) -> None:
+        """Resolved PR3a/PR3b/PR4 composition (orchestrator-level fix).
 
-        ``policy.M3_REQUIRED_CAPABILITIES`` requires read_workspace/
-        write_workspace, which the committed adapter honestly profiles PARTIAL
-        ("never silently SUPPORTED"), and ``require()`` fails closed for
-        anything below SUPPORTED — so the unpatched committed table rejects
-        every M3 execution at admission. If this test starts failing, the
-        table or the profile statuses changed and this composition needs
-        re-adjudication (a reviewable ``policy.py`` change per plan §5.1),
-        not a Host-side workaround.
+        An earlier draft of ``execution.policy.M3_REQUIRED_CAPABILITIES``
+        named ``read_workspace``/``write_workspace``, which the honest
+        OpenCode adapter can only ever mark PARTIAL (plan §2/§6) — that
+        combination made every M3 execution fail closed at admission
+        permanently. ``M3_REQUIRED_CAPABILITIES`` is now empty by design
+        (plan §5.1): M3's real enforcement is PermissionEnvelope +
+        containment + credentials allow-list, not the SUPPORTED-capability
+        mechanism, so the committed table admits the live profile without
+        the ``_no_required_capabilities`` test seam.
         """
 
         attempt = self._build_attempt()
-        self.assertEqual(
-            policy.M3_REQUIRED_CAPABILITIES, ("read_workspace", "write_workspace")
-        )
-        with self.assertRaises(AdmissionRejectedError) as raised:
-            execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY))
+        self.assertEqual(policy.M3_REQUIRED_CAPABILITIES, ())
 
-        self.assertEqual(raised.exception.reason, "required_capabilities_not_satisfied")
-        self.assertEqual(raised.exception.status, admission.AdmissionStatus.BLOCKED)
-        self.assertFalse(self._spawned_report().exists())
+        result = execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY))
+
+        self.assertEqual(result.attempt, ATTEMPT_REF)
+        self.assertTrue(self._spawned_report().is_file())
 
     def test_child_environment_is_allow_listed_not_inherited(self) -> None:
         """Real process-boundary credential enforcement (plan §6 step 4).

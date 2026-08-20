@@ -16,8 +16,15 @@ class M3ExecutionPolicyTest(unittest.TestCase):
         self.assertEqual(permissions.external_effects, ())
         self.assertEqual(permissions.process, ())
 
-    def test_required_capabilities_are_non_empty_strings(self) -> None:
-        self.assertTrue(policy.M3_REQUIRED_CAPABILITIES)
+    def test_required_capabilities_is_empty_by_design(self) -> None:
+        """M3 never marks a canonical action SUPPORTED (plan §2/§6), so a
+        required-capabilities entry here would make every execution fail
+        closed at admission. Real M3 enforcement is PermissionEnvelope +
+        containment + credentials allow-list, not require()."""
+
+        self.assertEqual(policy.M3_REQUIRED_CAPABILITIES, ())
+
+    def test_required_capabilities_entries_would_be_non_empty_strings(self) -> None:
         self.assertTrue(
             all(
                 isinstance(capability, str) and capability
