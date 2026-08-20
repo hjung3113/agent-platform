@@ -5,20 +5,38 @@ a live binary version query and the effective merged OpenCode configuration.
 This module owns profile construction only; the process wrapper and deny-first
 execution live in the later Host increment (plan §10.4).
 
-Modeled configuration precedence (documented first-adapter scope): OpenCode's
-layered config resolution is not fully discoverable from the CLI alone, so the
-caller-supplied ``config_paths`` are merged in the given order — later layers
-override earlier ones (callers pass layers from most specific to most
-inherited/global, e.g. ``(<project>/opencode.json, <global>/opencode.json)``).
-Layers that parse as JSON objects shallow-merge; any other layer (plain text
-such as a jsonc tail, or a JSON non-object) is retained verbatim as an opaque
-text layer in order. Missing paths contribute nothing. ``config_identity``
-digests the full merged result, so drift in any inherited/default layer is
-visible in ``RuntimeCapabilityProfile.identity``.
+Modeled configuration precedence (documented first-adapter scope, corrected
+after PR review — the calling convention below was previously stated
+backwards, which would have made an inherited/global layer silently win over
+a project-specific one): OpenCode's layered config resolution is not fully
+discoverable from the CLI alone, so the caller-supplied ``config_paths`` are
+merged in the given order — later layers override earlier ones, so **callers
+must pass layers from most general/inherited first to most specific last**,
+e.g. ``(<global>/opencode.json, <project>/opencode.json)``. Layers that parse
+as JSON objects shallow-merge; any other layer (plain text such as a jsonc
+tail, or a JSON non-object) is retained verbatim as an opaque text layer in
+order. Missing paths contribute nothing. ``config_identity`` digests the full
+merged result plus the current M3 execution policy (``execution.policy``'s
+admitted-permissions/required-capabilities tables), so drift in any
+inherited/default config layer, or in the M3 policy table itself, is visible
+in ``RuntimeCapabilityProfile.identity`` and causes the Host's execution-time
+recheck to fail closed on stale attempts (plan §5.1's staleness gap, closed
+here rather than by a contract change).
+
+Known unenforceable gap (documented honestly, not solved here): OpenCode's
+CLI has no flag to pin execution to exactly this probed/merged configuration
+or to suppress its own further discovery of an inherited/global config layer
+at spawn time. The Host pins the *project*-layer config by launching OpenCode
+with ``cwd`` set to the exact resolved workspace root this profile was probed
+against (same binding class as workspace containment), but cannot prove the
+live process did not additionally discover an unprobed global/default layer
+— the same enforceability class as network denial (plan §2/§6): unproven,
+not falsely claimed as proven.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from dataclasses import fields
@@ -32,6 +50,7 @@ from kernel.runtime_capability import (
     RuntimeCapabilityProfile,
 )
 
+from execution import policy
 from execution.policy import M3_ADMITTED_PERMISSIONS
 
 ADAPTER_IDENTITY = "opencode-adapter@1"
@@ -81,8 +100,38 @@ def _resolve_version(binary_path: str) -> str:
     return lines[0].strip().split()[-1]
 
 
+def _binary_content_digest(binary_path: str) -> str:
+    """Hash the executable's actual bytes; a reported version is not identity.
+
+    PR review: a binary replaced in place with different code that reports
+    the same ``--version`` would keep ``runtime`` unchanged under a
+    version-only identity, defeating the Attempt Packet's exact-runtime
+    binding and the Host's pre-spawn no-silent-substitution recheck. This
+    digest is folded into the ``runtime`` field itself (not a separate
+    profile field, since ``RuntimeCapabilityProfile``'s schema is frozen
+    M0-era shape) so drift is caught by the identity checks that already
+    exist end to end.
+    """
+
+    hasher = hashlib.sha256()
+    try:
+        with open(binary_path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                hasher.update(chunk)
+    except OSError as exc:
+        raise ValueError(f"unable to read opencode binary at {binary_path!r}: {exc}") from exc
+    return hasher.hexdigest()[:16]
+
+
 def _effective_config(config_paths: tuple[Path, ...]) -> dict[str, object]:
-    """Merge config layers in order into the digestable effective config."""
+    """Merge config layers in order into the digestable effective config.
+
+    Later entries in ``config_paths`` override earlier ones (standard
+    last-write-wins ``dict.update``): callers pass most general/inherited
+    layers first, most specific last, so a project-level layer wins over an
+    inherited/global one — the calling convention this function's callers
+    must honor is stated in this module's docstring.
+    """
 
     merged: dict[str, object] = {}
     raw_layers: list[str] = []
@@ -101,6 +150,23 @@ def _effective_config(config_paths: tuple[Path, ...]) -> dict[str, object]:
         else:
             raw_layers.append(text)
     return {"merged": merged, "raw_layers": raw_layers}
+
+
+def _m3_policy_snapshot() -> dict[str, object]:
+    """Digest input for the current M3 execution policy table.
+
+    Folded into ``config_identity`` (plan §5.1, PR-review fix): a future
+    change to ``execution.policy``'s admitted-permissions/required-
+    capabilities tables must change ``RuntimeCapabilityProfile.identity``, so
+    an already-published Attempt Packet's bound identity goes stale and the
+    Host's execution-time recheck rejects it, rather than silently executing
+    an old packet under new grants/requirements.
+    """
+
+    return {
+        "required_capabilities": list(policy.M3_REQUIRED_CAPABILITIES),
+        "admitted_permissions": policy.M3_ADMITTED_PERMISSIONS.to_canonical_value(),
+    }
 
 
 def _resolve_permission_envelope(
@@ -182,11 +248,16 @@ def probe_opencode_profile(
     """Probe the live OpenCode runtime and return its capability profile."""
 
     version = _resolve_version(binary_path)
+    binary_digest = _binary_content_digest(binary_path)
     effective_config = _effective_config(config_paths)
+    config_and_policy = {
+        "config": effective_config,
+        "m3_policy": _m3_policy_snapshot(),
+    }
     return RuntimeCapabilityProfile(
-        runtime=f"opencode@{version}",
+        runtime=f"opencode@{version}+{binary_digest}",
         adapter=ADAPTER_IDENTITY,
-        config_identity=content_digest(effective_config),
+        config_identity=content_digest(config_and_policy),
         tool_mapping_identity=content_digest(CANONICAL_ACTION_TOOL_MAPPING),
         permission_envelope=_resolve_permission_envelope(effective_config),
         capabilities=_mapped_capabilities(),

@@ -150,7 +150,7 @@ class HostExecuteTest(unittest.TestCase):
             )
 
         self.assertEqual(result.attempt, ATTEMPT_REF)
-        self.assertEqual(result.observation.runtime_identity, f"opencode@{FAKE_VERSION}")
+        self.assertTrue(result.observation.runtime_identity.startswith(f"opencode@{FAKE_VERSION}+"))
         self.assertEqual(
             result.output_snapshot_digest,
             snapshot_identity(self.root, declared).digest,
@@ -211,9 +211,14 @@ class HostExecuteTest(unittest.TestCase):
         rejection only — advisory, not process-boundary enforcement.
         """
 
-        attempt = self._build_attempt()
         required = ("read_workspace", "write_workspace", "network_access")
         with mock.patch.object(policy, "M3_REQUIRED_CAPABILITIES", required):
+            # Build under the same patch: M3_REQUIRED_CAPABILITIES is folded
+            # into config_identity (PR-review fix), so the attempt's stored
+            # profile identity must reflect the same policy the live probe
+            # will see during execute(), or this hits StaleRuntimeCapability-
+            # ProfileError instead of the admission rejection under test.
+            attempt = self._build_attempt()
             with self.assertRaises(AdmissionRejectedError) as raised:
                 execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY))
 

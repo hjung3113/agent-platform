@@ -5,6 +5,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from kernel.runtime_capability import (
     CapabilityAdmissionError,
@@ -51,7 +52,7 @@ class ProbeOpencodeProfileTest(unittest.TestCase):
 
     def test_runtime_field_embeds_reported_version(self) -> None:
         profile = probe_opencode_profile(str(FIXTURE_BINARY))
-        self.assertEqual(profile.runtime, f"opencode@{FAKE_VERSION}")
+        self.assertTrue(profile.runtime.startswith(f"opencode@{FAKE_VERSION}+"))
 
     def test_inherited_config_layer_change_changes_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,9 +158,60 @@ class ProbeOpencodeProfileTest(unittest.TestCase):
             other.chmod(0o755)
             baseline = probe_opencode_profile(str(FIXTURE_BINARY))
             drifted = probe_opencode_profile(str(other))
-            self.assertEqual(baseline.runtime, f"opencode@{FAKE_VERSION}")
-            self.assertEqual(drifted.runtime, "opencode@9.9.9")
+            self.assertTrue(baseline.runtime.startswith(f"opencode@{FAKE_VERSION}+"))
+            self.assertTrue(drifted.runtime.startswith("opencode@9.9.9+"))
             self.assertNotEqual(baseline.identity, drifted.identity)
+
+    def test_identical_version_different_binary_bytes_changes_identity(self) -> None:
+        """PR-review fix: a binary swap must be caught even at the same
+        reported version — the profile identity must bind executable content,
+        not merely the version string a (possibly substituted) binary
+        reports."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            same_version_different_bytes = Path(tmp) / "fake_opencode_same_version.py"
+            same_version_different_bytes.write_text(
+                FIXTURE_BINARY.read_text(encoding="utf-8") + "\n# distinct bytes\n",
+                encoding="utf-8",
+            )
+            same_version_different_bytes.chmod(0o755)
+
+            original = probe_opencode_profile(str(FIXTURE_BINARY))
+            substituted = probe_opencode_profile(str(same_version_different_bytes))
+
+            self.assertTrue(original.runtime.startswith(f"opencode@{FAKE_VERSION}+"))
+            self.assertTrue(substituted.runtime.startswith(f"opencode@{FAKE_VERSION}+"))
+            self.assertNotEqual(original.runtime, substituted.runtime)
+            self.assertNotEqual(original.identity, substituted.identity)
+
+    def test_specific_layer_wins_over_general_layer_last(self) -> None:
+        """PR-review fix: calling convention was previously documented and
+        exercised backwards (inherited/global would have silently won over
+        project-specific). Callers pass general-first, specific-last; the
+        specific value must survive the merge."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            general = _write_config(Path(tmp) / "global.json", {"model": "general"})
+            specific = _write_config(Path(tmp) / "project.json", {"model": "specific"})
+            profile = probe_opencode_profile(str(FIXTURE_BINARY), (general, specific))
+            reversed_profile = probe_opencode_profile(
+                str(FIXTURE_BINARY), (specific, general)
+            )
+            # Passing (general, specific) vs (specific, general) must differ:
+            # whichever is last wins, proving order is honored, not ignored.
+            self.assertNotEqual(profile.config_identity, reversed_profile.config_identity)
+
+    def test_m3_policy_change_folds_into_profile_identity(self) -> None:
+        """PR-review fix: a change to the M3 policy table (previously
+        unbound to any packet/profile identity) must now change
+        RuntimeCapabilityProfile.identity, so a stale attempt built under an
+        old policy fails closed at execution time."""
+
+        baseline = probe_opencode_profile(str(FIXTURE_BINARY))
+        with mock.patch.object(policy, "M3_REQUIRED_CAPABILITIES", ("read_workspace",)):
+            changed = probe_opencode_profile(str(FIXTURE_BINARY))
+        self.assertNotEqual(baseline.config_identity, changed.config_identity)
+        self.assertNotEqual(baseline.identity, changed.identity)
 
     def test_missing_binary_raises_value_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
