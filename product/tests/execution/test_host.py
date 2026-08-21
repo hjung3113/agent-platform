@@ -11,7 +11,7 @@ from unittest import mock
 
 from kernel import admission
 from kernel.protocol import ContractKind, RecordRef
-from kernel.protocol_v1 import AttemptPacketV1, read_result_v1
+from kernel.protocol_v1 import AttemptPacketV1, TaskV1, read_result_v1
 from execution import host, policy
 from execution.host import (
     AdmissionRejectedError,
@@ -42,6 +42,11 @@ ATTEMPT_REF = RecordRef(
     content_digest="sha256:agent-platform-json-v1:" + "b" * 64,
 )
 CONTEXT_DIGEST_FIXTURE = "sha256:agent-platform-json-v1:" + "e" * 64
+TASK = TaskV1(
+    task_id="task-host-1",
+    objective="Prove the Host actually receives the admitted task",
+    acceptance_criteria=("The runtime message contains the task objective",),
+)
 
 
 class HostExecuteTest(unittest.TestCase):
@@ -146,6 +151,7 @@ class HostExecuteTest(unittest.TestCase):
                 attempt,
                 self.root,
                 str(FIXTURE_BINARY),
+                TASK,
                 declared_generated_paths=declared,
             )
 
@@ -162,12 +168,76 @@ class HostExecuteTest(unittest.TestCase):
         outcome = read_result_v1(result.to_canonical_value())
         self.assertEqual(outcome.value, result)
 
+        report = json.loads(self._spawned_report().read_text(encoding="utf-8"))
+        self.assertIn(TASK.objective, report["message"])
+        for criterion in TASK.acceptance_criteria:
+            self.assertIn(criterion, report["message"])
+
+    def test_runtime_nonzero_exit_raises_instead_of_producing_a_result(self) -> None:
+        """PR review: a genuinely failed run must not silently produce a
+        Result. Exit-code 0 stays untrusted (completion is snapshot-derived,
+        not stdout/exit-code-derived) -- but a nonzero exit is a real
+        execution failure, not merely an unreliable success signal."""
+
+        (self.root / DIRECTIVE_NAME).write_text("fail", encoding="utf-8")
+        attempt = self._build_attempt()
+
+        with self._no_required_capabilities():
+            with self.assertRaises(host.RuntimeExecutionFailedError) as raised:
+                execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
+
+        self.assertEqual(raised.exception.returncode, 3)
+        self.assertFalse(self._spawned_report().exists())
+
+    def test_requested_effect_rejects_through_execute_before_spawn(self) -> None:
+        """PR review: requested_effects was constructible on AttemptRequest
+        directly but never reachable from execute() itself, so no real
+        caller could actually exercise external-effect rejection end to end."""
+
+        attempt = self._build_attempt()
+        with self._no_required_capabilities():
+            with self.assertRaises(AdmissionRejectedError) as raised:
+                execute(
+                    ATTEMPT_REF,
+                    attempt,
+                    self.root,
+                    str(FIXTURE_BINARY),
+                    TASK,
+                    requested_effects=("github:push",),
+                )
+
+        self.assertEqual(raised.exception.reason, "external_effect_not_admitted")
+        self.assertFalse(self._spawned_report().exists())
+
+    def test_non_utf8_stdout_scans_as_unknown_and_blocks_retention(self) -> None:
+        """PR review: subprocess.run(text=True) would raise UnicodeDecodeError
+        on invalid bytes before scan_for_retention ever ran. Bytes are now
+        captured and decoded under Host control; a decode failure becomes
+        scan_for_retention(None) -> "unknown", which still blocks retention
+        rather than crashing execute() outright."""
+
+        (self.root / DIRECTIVE_NAME).write_text("invalid-utf8-stdout", encoding="utf-8")
+        attempt = self._build_attempt()
+
+        with self._no_required_capabilities():
+            with self.assertRaises(RetentionBlockedError) as raised:
+                execute(
+                    ATTEMPT_REF,
+                    attempt,
+                    self.root,
+                    str(FIXTURE_BINARY),
+                    TASK,
+                    retain_evidence=True,
+                )
+
+        self.assertIn("stdout scan status=unknown", str(raised.exception))
+
     def test_stale_runtime_capability_profile_rejects_before_spawn(self) -> None:
         drift_identity = probe_opencode_profile(str(self._drift_binary())).identity
         attempt = self._build_attempt(profile_identity=drift_identity)
 
         with self.assertRaises(StaleRuntimeCapabilityProfileError):
-            execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY))
+            execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
 
         self.assertFalse(self._spawned_report().exists())
 
@@ -176,7 +246,7 @@ class HostExecuteTest(unittest.TestCase):
         (self.root / "untracked-late.txt").write_text("late mutation\n", encoding="utf-8")
 
         with self.assertRaises(StaleWorkspaceSnapshotError):
-            execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY))
+            execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
 
         self.assertFalse(self._spawned_report().exists())
 
@@ -197,7 +267,7 @@ class HostExecuteTest(unittest.TestCase):
         with self._no_required_capabilities():
             with mock.patch.object(host, "probe_opencode_profile", mutating_probe):
                 with self.assertRaises(StaleWorkspaceSnapshotError):
-                    execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY))
+                    execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
 
         self.assertTrue(injected.is_file())
         self.assertFalse(self._spawned_report().exists())
@@ -220,7 +290,7 @@ class HostExecuteTest(unittest.TestCase):
             # ProfileError instead of the admission rejection under test.
             attempt = self._build_attempt()
             with self.assertRaises(AdmissionRejectedError) as raised:
-                execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY))
+                execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
 
         self.assertEqual(raised.exception.reason, "required_capabilities_not_satisfied")
         self.assertFalse(self._spawned_report().exists())
@@ -242,7 +312,7 @@ class HostExecuteTest(unittest.TestCase):
         attempt = self._build_attempt()
         self.assertEqual(policy.M3_REQUIRED_CAPABILITIES, ())
 
-        result = execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY))
+        result = execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
 
         self.assertEqual(result.attempt, ATTEMPT_REF)
         self.assertTrue(self._spawned_report().is_file())
@@ -264,7 +334,7 @@ class HostExecuteTest(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ", {SENTINEL_VARIABLE: "test-sentinel-secret-value"}
             ):
-                result = execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY))
+                result = execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
 
         report = json.loads(self._spawned_report().read_text(encoding="utf-8"))
         self.assertFalse(report["sentinel_secret_seen"])
@@ -298,7 +368,7 @@ class HostExecuteTest(unittest.TestCase):
 
         attempt = self._build_attempt()
         with self._no_required_capabilities():
-            result = execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY))
+            result = execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
 
         self.assertEqual(
             result.output_snapshot_digest, attempt.workspace_snapshot_digest
@@ -327,7 +397,7 @@ class HostExecuteTest(unittest.TestCase):
         with self._no_required_capabilities():
             with mock.patch.object(host, "_resolve_runtime_binary", drifting_resolver):
                 with self.assertRaises(RuntimeSubstitutionRejectedError):
-                    execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY))
+                    execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
 
         self.assertFalse(self._spawned_report().exists())
 
@@ -346,7 +416,7 @@ class HostExecuteTest(unittest.TestCase):
         with self._no_required_capabilities():
             with mock.patch.object(host, "probe_opencode_profile", drifting_probe):
                 with self.assertRaises(RuntimeSubstitutionRejectedError):
-                    execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY))
+                    execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
 
         self.assertFalse(self._spawned_report().exists())
 
@@ -374,6 +444,7 @@ class HostExecuteTest(unittest.TestCase):
                     attempt,
                     self.root,
                     str(FIXTURE_BINARY),
+                    TASK,
                     declared_generated_paths=declared,
                 )
 
@@ -388,7 +459,7 @@ class HostExecuteTest(unittest.TestCase):
         attempt = self._build_attempt()
 
         with self._no_required_capabilities():
-            result = execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY))
+            result = execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
 
         self.assertEqual(result.attempt, ATTEMPT_REF)
 
@@ -403,6 +474,7 @@ class HostExecuteTest(unittest.TestCase):
                     attempt,
                     self.root,
                     str(FIXTURE_BINARY),
+                    TASK,
                     retain_evidence=True,
                 )
 
@@ -418,6 +490,7 @@ class HostExecuteTest(unittest.TestCase):
                 attempt,
                 self.root,
                 str(FIXTURE_BINARY),
+                TASK,
                 retain_evidence=True,
             )
 

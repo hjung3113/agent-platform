@@ -8,15 +8,22 @@ run the runtime with an allow-listed child environment, and derive the
 Result's ``output_snapshot_digest`` from actual post-execution workspace
 state — never from the runtime's exit code or stdout (plan §6 step 6).
 
-Per-axis enforcement honesty (plan §2/§6 step 4): credentials are a real
-process-boundary control (the child env is built from scratch as PATH plus
-the credentials allow-list, nothing ambient); external effects stay empty by
-policy and any request for one fails admission; filesystem and process axes
-are declared-scope policy checks (candidate paths containment-checked before
-spawn, cwd pinned to the resolved workspace root), not syscall interception;
-network is not enforced at all. The profile's honest PARTIAL/UNKNOWN statuses
-plus ``admit_attempt``'s fail-closed ``require()`` are the control for those
-axes — no fake enforcement code exists here for them.
+Per-axis enforcement honesty (plan §2/§6 step 4, corrected after PR review):
+credentials are a real process-boundary control (the child env is built from
+scratch as PATH plus the credentials allow-list, nothing ambient); filesystem
+and process axes are declared-scope policy checks (candidate paths
+containment-checked before spawn, cwd pinned to the resolved workspace root),
+not syscall interception; network is not enforced at all. External effects
+are **declarative admission rejection only, not a process-boundary control**:
+an Attempt that declares a ``requested_effects`` entry not in the admitted
+envelope fails ``admit_attempt`` before spawn, but the spawned OpenCode
+process (and any shell/tool it invokes) is not prevented from directly
+calling ``git push``/``gh``/``curl``/an equivalent client — same unenforced-
+at-process-level class as network denial, not the stronger "real process-
+boundary + policy enforcement" an earlier draft claimed. The profile's honest
+PARTIAL/UNKNOWN statuses plus ``admit_attempt``'s fail-closed ``require()``
+are the control for the axes this milestone cannot really enforce — no fake
+enforcement code exists here for them.
 
 The execution-layer errors below are deliberately not
 ``PublishRejectionCode`` values: when one fires no Kernel record is produced,
@@ -32,7 +39,7 @@ from pathlib import Path
 
 from kernel import admission
 from kernel.protocol import RecordRef
-from kernel.protocol_v1 import AttemptPacketV1, ResultV1, RuntimeObservationV1
+from kernel.protocol_v1 import AttemptPacketV1, ResultV1, RuntimeObservationV1, TaskV1
 from kernel.runtime_capability import RuntimeCapabilityProfile
 
 from execution import policy
@@ -55,6 +62,21 @@ class RuntimeSubstitutionRejectedError(Exception):
 
 class RetentionBlockedError(Exception):
     """Captured output failed the pre-retention redaction gate."""
+
+
+class RuntimeExecutionFailedError(Exception):
+    """The spawned runtime exited non-zero; no Result is produced.
+
+    Plan §6 step 6's "exit code alone does not establish completion" means
+    a zero exit / success-claiming stdout is not trusted — it does not mean
+    a non-zero exit is discarded. A crashed/erroring runtime process is a
+    real execution failure, surfaced here rather than silently packaged into
+    a Result whose digest happens to reflect unchanged workspace state.
+    """
+
+    def __init__(self, returncode: int, stderr: str) -> None:
+        super().__init__(f"runtime exited {returncode}: {stderr.strip()}")
+        self.returncode = returncode
 
 
 class AdmissionRejectedError(Exception):
@@ -81,6 +103,24 @@ def _resolve_runtime_binary(opencode_binary_path: str) -> Path:
     if not (resolved.is_file() and os.access(resolved, os.X_OK)):
         raise ValueError(f"opencode binary is not an executable file: {resolved}")
     return resolved
+
+
+def _task_message(task: TaskV1) -> str:
+    """Render the admitted task's authoritative description for the runtime.
+
+    PR review: an earlier draft spawned OpenCode with no task information at
+    all, so the fake runtime (and any real one) succeeded independently of
+    what was actually admitted — the E2E chain proved protocol wiring but
+    not that the published task's objective/acceptance criteria reached
+    execution. This is the exact, lineage-checked ``TaskV1`` the driver
+    already holds (not arbitrary compiled context — that stays M4 scope);
+    rendering it as the ``run`` message mirrors OpenCode's own
+    ``run [message..]`` positional-argument shape.
+    """
+
+    lines = [task.objective, "", "Acceptance criteria:"]
+    lines.extend(f"- {criterion}" for criterion in task.acceptance_criteria)
+    return "\n".join(lines)
 
 
 def _child_environment() -> dict[str, str]:
@@ -152,12 +192,20 @@ def execute(
     attempt: AttemptPacketV1,
     workspace_root: Path,
     opencode_binary_path: str,
+    task: TaskV1,
     config_paths: tuple[Path, ...] = (),
     declared_generated_paths: tuple[str, ...] = (),
     *,
     retain_evidence: bool = False,
+    requested_effects: tuple[str, ...] = (),
 ) -> ResultV1:
     """Execute one Attempt inside the deny-first M3 envelope (plan §6).
+
+    ``task`` is the authoritative published ``TaskV1`` this Attempt binds to
+    (the caller's already-verified ``workflow_revision.task``); its
+    objective/acceptance criteria are rendered as the runtime's ``run``
+    message so the spawned process actually receives the admitted task
+    (PR review — a prior draft spawned OpenCode with no task information).
 
     ``declared_generated_paths`` entries become the admission request's
     candidate write paths, interpreted as relative paths under the resolved
@@ -165,6 +213,12 @@ def execute(
     admission's containment check when it points outside the root. The
     containment decision itself belongs to ``admission.admit_attempt``
     (plan §4) and is never re-derived here.
+
+    ``requested_effects`` lets a caller express that this Attempt needs an
+    external effect; since the M3 admitted envelope's ``external_effects`` is
+    always empty (§5.1's fixed policy), any non-empty value here fails
+    admission — a real declarative rejection path, but not a process-boundary
+    control (see this module's docstring).
     """
 
     pre_snapshot = snapshot_identity(workspace_root, declared_generated_paths)
@@ -192,6 +246,7 @@ def execute(
         candidate_paths=tuple(
             resolved_root / Path(path) for path in declared_generated_paths
         ),
+        requested_effects=requested_effects,
     )
     admission_result = admission.admit_attempt(request)
     if admission_result.status is not admission.AdmissionStatus.ADMITTED:
@@ -208,18 +263,41 @@ def execute(
     )
 
     completed = subprocess.run(
-        [str(resolved_binary), "run", "--workdir", str(resolved_root)],
+        [
+            str(resolved_binary),
+            "run",
+            _task_message(task),
+            "--workdir",
+            str(resolved_root),
+        ],
         cwd=resolved_root,
         env=_child_environment(),
         capture_output=True,
-        text=True,
         check=False,
     )
 
+    if completed.returncode != 0:
+        raise RuntimeExecutionFailedError(
+            completed.returncode,
+            completed.stderr.decode("utf-8", errors="replace"),
+        )
+
     if retain_evidence:
+        # Decode under Host control, strictly: subprocess.run's own text=True
+        # decoding would raise UnicodeDecodeError on invalid bytes before
+        # scan_for_retention ever runs (PR review). Invalid UTF-8 becomes
+        # scan_for_retention(None) -> "unknown", which RetentionBlockedError
+        # below already treats as not "passed" -- the fail-closed path stays
+        # reachable instead of crashing.
+        def _decode_for_scan(raw: bytes) -> str | None:
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+
         scan_results = (
-            ("stdout", scan_for_retention(completed.stdout)),
-            ("stderr", scan_for_retention(completed.stderr)),
+            ("stdout", scan_for_retention(_decode_for_scan(completed.stdout))),
+            ("stderr", scan_for_retention(_decode_for_scan(completed.stderr))),
         )
         blocked_streams = [
             f"{stream} scan status={result.status}"

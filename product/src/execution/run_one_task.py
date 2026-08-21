@@ -164,6 +164,7 @@ def run_one_task(
         attempt_value,
         workspace_root,
         opencode_binary_path,
+        task,
         config_paths,
         declared_generated_paths,
     )
