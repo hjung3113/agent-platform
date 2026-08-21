@@ -1,128 +1,179 @@
 # Handoff
 
-## Completed in this slice (M2 implementation)
+## Completed in this slice (M3 implementation)
 
-- M2 — Attempt/Result/Verification/Receipt one-task protocol E2E implemented and merged
-  per [`docs/plans/active/m2-one-task-protocol-e2e.md`](docs/plans/active/m2-one-task-protocol-e2e.md),
-  PR #43. 5 commits (protocol readers → publish state machine → replay extension → stub
-  Host/Verifier → e2e integration), each independently reviewable, plus one post-review
-  fix commit.
-- Implementation dispatched via `orca` worktrees to `opencode`/`zai-coding-plan/glm-5.3`
-  (effort `high` for protocol readers, publish state machine, and e2e integration; effort
-  `low` for replay extension and stub Host/Verifier), tracked as an `orca orchestration`
-  task DAG (`run_30bc5e66c6a0`). PR4 (stub Host/Verifier) ran in a separate parallel
-  worktree since it only depends on PR1, then was cherry-picked into the integration
-  branch once PR1 landed.
-- Real design defect caught and fixed mid-implementation, not just at PR review: PR2's
-  first pass special-cased a second Workflow Revision publishing at a Workflow Revision
-  head, to avoid touching 3 pre-existing M1 tests that happened to use a second Workflow
-  Revision as chain filler. That directly violated plan §2's "one record of each kind per
-  run, no branching." Rejected on review; fixed by updating the affected M1 tests
-  (`test_publish.py`, `test_replay.py`, `test_fault_injection.py`, `test_m1_integration.py`)
-  to fill the same chain slots with an Attempt Packet — the actual valid next kind — instead
-  of weakening the state machine. `publish.py`'s `_NEXT_KIND` table has no self-loop on any
-  kind.
-- Two more real defects caught by GitHub PR review (Codex + human adversarial pass) after
-  merge-readiness, fixed in a follow-up commit before merging:
-  1. `read_verification_v1` accepted a `PASS` verdict with non-empty `findings`, letting a
-     self-contradictory authoritative Verification (and a terminal Receipt built on it)
-     exist. Plan §3 defines findings as "non-empty only when verdict != PASS"; the reader
-     recomputed verdict from coverage but never checked this side of the invariant. Now
-     rejects `MALFORMED_PAYLOAD`.
-  2. `Result.output_snapshot_digest` (and the embedded Observation's copy) was validated as
-     merely a non-empty string, not content-digest-shaped, while Verification's `SATISFIED`
-     `evidence_digest` is required to be both content-digest-shaped *and* equal to it. A
-     Result with a non-digest-shaped identity could publish successfully but could never
-     receive a `PASS` Verification — an authoritative dead-end reachable at the protocol
-     layer alone. Both fields now require `is_content_digest()`.
-  - A third PR-review finding (an M1 run with multiple Workflow Revisions crashing instead
-    of migrating cleanly on `publish.py`'s stricter lookup) was **not** actioned: M2 has no
-    persisted production state to migrate. Compatibility registry / historical
-    cross-version rule provenance is explicit M7 scope per the plan doc's own deferred
-    section (§10). Revisit only if a concrete cross-version migration need appears before
-    M7.
-- Design decisions from the M2 plan doc held without needing rework during implementation:
-  4 new `ContractKind`s each independently published/fenced through M1's `publish()`
-  mechanism; `verdict` as a reader-enforced total function of `coverage`; the
-  reader/publish split for payload-local vs. lineage-aware checks; evidence binding via
-  `evidence_digest == Result.output_snapshot_digest`; `ReceiptV1.receipt_type == "terminal"`
-  literal; every stub builder taking the published `RecordRef`, never the candidate payload
-  object (plan §6's explicitly-called-out defect, correctly avoided by the implementer on
-  the first pass).
+- M3 — Real Host/security boundary and first runtime adapter (OpenCode) implemented and
+  merged per [`docs/plans/active/m3-real-host-security-boundary.md`](docs/plans/active/m3-real-host-security-boundary.md),
+  plan PR #44, implementation PR #45. Evidence attached to tracking
+  [Issue #34](https://github.com/hjung3113/agent-platform/issues/34).
+- Plan drafted, adversarial-reviewed by `glm-5.3` (effort high, via opencode) against the
+  roadmap's five lenses plus targeted attacks on the deny-first enforcement claims and TOCTOU
+  behavior, then hardened (plan §13) before implementation started — found and fixed one
+  BLOCKER (network deny-first overclaimed as real process enforcement) and multiple HIGH
+  findings (unbound admission-policy inputs, an unclosed admission-to-spawn TOCTOU window,
+  filesystem/process "enforcement" overclaiming interception it can't deliver).
+- Implementation dispatched via `orca`/`opencode`/`codex exec` as an 18-task DAG: `gpt-5.6-luna`
+  (effort max) for straightforward implementation, `glm-5.3` (effort high, via opencode) for
+  the two security/design-critical pieces (OpenCode adapter probe, deny-first Host), `glm-5.3`
+  (effort low) for containment test fixtures. 11 commits on `product/m3-real-host-boundary`,
+  each independently reviewable: Workspace Snapshot identity → containment fixtures → policy
+  table + adapter probe → deny-first Host → redaction gate → attempt-packet real identities →
+  reference driver/E2E integration → stub retirement.
+- Real design defect caught mid-implementation, not just at review: PR4's implementer
+  (`glm-5.3` high) surfaced rather than silently patched a contradiction between the fixed M3
+  policy table (which named `read_workspace`/`write_workspace` as required capabilities) and
+  the honest OpenCode adapter (which can only ever mark those `PARTIAL`, never `SUPPORTED`
+  per the plan's own honesty rule) — the unpatched combination made every M3 execution
+  permanently fail closed at admission. Resolved by making `M3_REQUIRED_CAPABILITIES` empty
+  by design: M3's real enforcement is `PermissionEnvelope` + containment + credentials
+  allow-list, not the `require()`/`SUPPORTED`-capability mechanism.
+- A second, larger review round after both PRs were opened: the repo owner and
+  `chatgpt-codex-connector` (automated PR review) found 14 further real defects across the
+  plan and the implementation — verified individually against the actual committed code
+  (not assumed correct) before fixing. All P1s fixed except two, which were investigated and
+  then explicitly, honestly downgraded to documented scope limits rather than silently left
+  implicit (see "Explicit deferrals" below). Fixed in 5 follow-up commits (also merged in
+  PR #45), full detail in the plan doc's §14:
+  - `generated_digest` hashed only declared path *names*; a Git-ignored generated artifact's
+    actual content could change with zero digest change. Now hashes each path's own
+    file/symlink/absent state.
+  - Nested-repository identity bound only path + HEAD commit; uncommitted changes inside a
+    nested worktree never changed the outer Workspace Snapshot. Now recurses through the
+    nested repo's own full `snapshot_identity`.
+  - `RuntimeCapabilityProfile.runtime` bound only a reported `--version` string; a binary
+    substituted in place with different code reporting the same version would pass the
+    Host's no-silent-substitution recheck unnoticed. Now folds a content digest of the
+    executable's actual bytes into `runtime`.
+  - `host.execute()` spawned OpenCode with **zero task information** — no objective, no
+    acceptance criteria — so the runtime succeeded independently of what was actually
+    admitted; the E2E chain proved protocol wiring only. `execute()` now takes the
+    authoritative `TaskV1` and renders it as the runtime's `run` message.
+  - A nonzero runtime exit code was silently discarded (`subprocess.run(check=False)`) and
+    still produced a successful Result. Now raises `RuntimeExecutionFailedError` before any
+    Result is built — "exit code alone doesn't establish completion" always meant zero-exit
+    isn't *trusted*, never that a crash should be *discarded*.
+  - `capture_output=True, text=True` decoded subprocess output before the redaction scanner
+    ever ran, so invalid UTF-8 raised `UnicodeDecodeError` instead of degrading to
+    `"unknown"`. Output is now captured as bytes and decoded under Host control.
+  - External-effect denial was documented/claimed as "real process-boundary + policy
+    enforcement," but the spawned OpenCode process/shell was never actually prevented from
+    calling `git push`/`gh`/`curl` directly, and `requested_effects` wasn't even reachable
+    from `execute()` in the first shipped draft. Relabeled to match what's actually
+    enforced (declarative admission rejection only, same class as network denial) and wired
+    `requested_effects` through as a real `execute()` parameter.
+  - The plan documented an inverted OpenCode config-merge precedence ("pass specific first,
+    inherited/global last" combined with "later overrides earlier" — backwards). Corrected
+    the calling convention; no merge-code change was needed.
+  - The redaction gate's design implied reusing `admission.admit_attempt`'s pre-spawn
+    `retain_evidence` check for post-spawn stdout/stderr — impossible, since output doesn't
+    exist until after the subprocess returns. Clarified as two genuinely separate gates
+    (the implementation already had this right; only the plan text was wrong).
+  - Symlink-loop containment hardened with an explicit, Python-version-independent bounded
+    chain walk, as defense-in-depth (the cited failing case already passed on this
+    platform/Python version — could not reproduce the reviewer's exact failure).
 
-## Validation (M2, post-merge)
+## Validation (M3, post-merge)
 
 ```
 PYTHONPATH=product/src python3.12 -m unittest discover -s product/tests/contracts -p 'test_*.py' -v   # 133 passed
 PYTHONPATH=product/src python3.12 -m unittest discover -s product/tests/kernel -p 'test_*.py' -v       # 78 passed
-PYTHONPATH=product/src python3.12 -m unittest discover -s product/tests/execution -p 'test_*.py' -v    # 11 passed
+PYTHONPATH=product/src python3.12 -m unittest discover -s product/tests/execution -p 'test_*.py' -v    # 67 passed
 PYTHONPATH=product/src python3.12 -m unittest discover -s product/tests/verification -p 'test_*.py' -v # 5 passed
 python3.12 -m compileall -q product/src product/tests                                                  # passed
 ```
 
-227 tests total, all green. M0/M1 suites unmodified in semantics (only the 4 test files
-noted above changed, to swap a filler Workflow Revision for a filler Attempt Packet).
+283 tests total, all green. M0/M1/M2 suites: `test_m2_integration.py` was deliberately
+**deleted**, not just left green — `test_m3_integration.py` proves the identical Kernel
+publish/replay/PASS/FAIL invariants through the real Host instead of the retired stub, so no
+coverage was lost by retiring the stub-era duplicate (see PR7b in the plan's §10).
 
-M2 exit gate (plan doc §9) self-checked bullet-by-bullet against the combined PR1-PR5 test
-suites during PR5's implementation; see PR #43 description for the per-bullet test mapping.
+## Completed earlier (M2)
+
+- M2 — Attempt/Result/Verification/Receipt one-task protocol E2E, PR #43. See prior handoff
+  commits for full detail if needed — not reproduced here to keep this file current rather
+  than cumulative.
 
 ## Completed earlier (M1)
 
-- M1 — Kernel authoritative publication and replay spine, 4 PRs per
-  [`docs/plans/active/m1-kernel-authoritative-publication.md`](docs/plans/active/m1-kernel-authoritative-publication.md).
-  Merged as PR #41; adversarial review pass fixed 6 findings before merge (fail-closed head
-  re-derivation, state-machine enforcement, genesis idempotency recovery across crash,
-  fault-closed replay integrity checks, run_id format validation, lock timeout). See prior
-  handoff commits for full detail if needed — not reproduced here to keep this file current
-  rather than cumulative.
+- M1 — Kernel authoritative publication and replay spine, PR #41. See prior handoff commits
+  for full detail if needed.
 
 ## Next session — fixed scope
 
-**Plan M3** per [`mvp-implementation-roadmap.md`](docs/plans/active/mvp-implementation-roadmap.md)
-line 204 ("M3 — Real Host/security boundary and first runtime adapter"), then implement it.
-No M3 plan doc exists yet — start there, following the same process M1/M2 used (design
-review with the user, adversarial pass on the plan draft before locking it, then dispatch
-implementation).
+**Plan M4** per [`mvp-implementation-roadmap.md`](docs/plans/active/mvp-implementation-roadmap.md)
+line 237 ("M4 — Deterministic Context Compiler"), then implement it. No M4 plan doc exists
+yet — start there, following the same process M1/M2/M3 used: design doc, adversarial review
+(consider a **second** review round after implementation too, not only before — this
+session's second round caught 14 real defects a single pre-implementation review missed),
+then dispatch implementation.
 
-M3 replaces the fake execution boundary M2 proved wiring for with one real enforceable
-runtime path, without generalizing portability yet:
+M4 replaces M2's opaque `AttemptPacketV1.context_digest` fixture field with a real,
+structured Context Pack, compiled deterministically over exactly the admitted task/lineage/
+source identities:
 
-- effective Workspace Snapshot identity (tracked/staged/unstaged/untracked/generated/nested
-  state as outcome-relevant)
-- resolved workspace containment and escape rejection (traversal/symlink/equivalent)
-- Runtime Capability Profile bound to Attempt admission and execution, not just admission
-- effective permission-envelope comparison after native/default/inherited config resolution
-  — inherited/default permissions must not widen the admitted envelope
-- deny-first filesystem/network/process/credential/external-effect enforcement where the
-  runtime can enforce it; no silent runtime/transport/tool fallback
-- real Runtime Observation and exact output snapshot provenance (replacing M2's
-  `stub_execute`, which derives `output_snapshot_digest` as a pure function of the Attempt
-  Packet's digest — no real execution)
-- pre-retention redaction/sensitivity gate sufficient for retained runtime output/evidence
-- deterministic adapter conformance fixtures independent of model/network availability;
-  live runtime smoke tests supplemental only
+- structured Context Unit with trust/authority class, source identity/digest, scope,
+  inclusion reason, required/optional class, and content/range
+- deterministic ordering and deduplication
+- frozen candidate identities for one compilation
+- versioned selection policy and token/cost estimator identity
+- provenance-closure freshness checks for derived context — M3's now-real Workspace
+  Snapshot identity (`execution/workspace_snapshot.py`) is one of the freshness-check inputs
+  this milestone gets to build on, not invent
+- required/optional budget accounting across actual platform-controlled disclosure
+- typed `CONTEXT_BUDGET_EXCEEDED`
+- deterministic optional omission/truncation record
+- runtime disclosure profile identity/reserved-cost binding
 
-**Default first runtime: OpenCode.** Additional runtimes stay deferred to M8.
+Start in-process. Do not create a Context service.
 
-**Non-goals for M3:** all runtimes, general plugin system, release automation,
-sophisticated secret-classification taxonomy, real evidence policy (M5), Context Compiler
-(M4), DAG/retry/repair/replan (M6).
+**Non-goals for M4:** all runtimes beyond OpenCode (M8), release automation, hardened
+criterion/evidence policy (M5), orchestration expansion (M6). Reuse M3's real
+`RuntimeCapabilityProfile`/`workspace_snapshot` primitives rather than inventing parallel
+freshness/identity machinery.
 
-**Exit evidence to design toward:** traversal/symlink/equivalent escape cases fail closed;
-unsupported/partial/unknown required capability cannot execute without an explicitly
-admitted degraded mode; runtime/config/tool-mapping drift changes profile identity and
-invalidates stale admission; inherited/default permissions cannot widen the admitted
-envelope; runtime exit/stdout cannot directly establish completion; retained canary secret
-fixtures do not persist raw secret material.
+**Exit evidence to design toward:** shuffled filesystem/API/input order produces the same
+selected order and digest; malicious repository/issue/external/runtime text cannot add
+capabilities, mandatory sources, approval, PASS, or policy; stale derived context fails
+after any bound authoritative dependency changes; undersized required-context budget
+produces no runnable Attempt; disclosure drift after compilation rejects or recompiles
+rather than silently expanding context.
 
-Primary issues: #7, #8.
+Primary issue: #6, with security overlap in #8.
 
-M2's stub Host/Verifier (`product/src/execution/stub_host.py`,
-`product/src/verification/stub_verifier.py`) are M3's replacement targets, not code to
-extend in place — M3 should design the real Host boundary against
-`product/agents/roles/implementer.md`'s actual requirements, then decide how much of the
-stub's shape (function signatures, RecordRef-in/typed-payload-out pattern) survives versus
-gets replaced outright.
+`AttemptPacketV1.context_digest` (currently `execution/attempt.py`'s M2-era
+`_fixture_digest("context", task_id)`, deliberately left untouched through M3) is M4's
+replacement target — decide how much of the fixture's shape (a single opaque digest field on
+the packet) survives versus needs a real structured Context Pack reference.
+
+## Explicit scope limits carried forward from M3 (not gaps to silently close in M4)
+
+These were investigated during M3's second review round and deliberately downgraded to
+documented, accepted scope limits rather than fixed — revisit only if a concrete milestone
+need makes them load-bearing, per AGENTS.md rule 9 (YAGNI):
+
+- **Per-task capability-requirement differentiation.** M3's admission policy
+  (`execution/policy.py`) is one fixed global table; it cannot express "this specific task
+  requires network/filesystem/process isolation as a guarantee." Real per-task/per-role
+  requirement binding needs either a contract change or M6's real orchestration layer, where
+  task variability first becomes real — M4's Context Compiler is not obviously the right
+  place either, but check when M4 design starts.
+- **OpenCode global-config provenance.** `execution/opencode_adapter.py` probes and digests
+  merged config layers, and `execution/host.py` pins the *project*-layer config by launching
+  OpenCode with `cwd` at the exact resolved workspace root — but OpenCode's CLI has no flag
+  to pin a spawned process to exactly the probed configuration or to prove it didn't
+  additionally discover an unprobed global/default layer. Same enforceability class as
+  network denial (below); would need a concrete OpenCode-side mechanism, not a Kernel-side
+  one, to close.
+- **Network and filesystem/process-interception-beyond-declared-scope remain unenforced**,
+  by original M3 design (plan §2/§6) — profiled `PARTIAL`/`UNKNOWN`, `require()` fails closed
+  for any Attempt that actually needs them. A real per-OS sandbox (macOS `sandbox-exec`/
+  Seatbelt, Linux seccomp-bpf/network namespace) is not assigned to any milestone yet; raise
+  it as an explicit roadmap amendment before any workflow's task genuinely requires these as
+  `SUPPORTED` rather than `PARTIAL`.
+- **External-effect denial is declarative admission rejection only**, not a process-boundary
+  control — same document/enforcement-honesty class as network. `permission_envelope.
+  external_effects` stays empty for every M3 path; real release/external-effect authorization
+  is M9 scope per the roadmap, unchanged.
 
 ## Deferred until the corresponding gate
 
@@ -130,8 +181,6 @@ gets replaced outright.
 
 - cross-platform (Windows/Linux) crash-consistency validation of the M1 store
 - compatibility registry, historical cross-version rule provenance, retained-lineage replay
-  (includes the M2-PR-review finding about multi-Workflow-Revision legacy runs — no action
-  needed until this gate is concrete)
 - reader/rule retirement reachability
 
 ### Only if a concrete need appears later
@@ -141,15 +190,17 @@ gets replaced outright.
 - storage-backend abstraction beyond the concrete filesystem implementation
 - cross-machine locking/leases for multi-process publication across machines
 
-### Later milestones (unchanged from M0/M1 handoff)
+### Later milestones (unchanged from M0/M1/M2 handoff)
 
 - #5 verification/evidence soundness after authoritative lineage/snapshot bindings exist
   (M5 — hardened criterion/evidence policy, execution-provenance independence,
   self-verification closed by real distinct identity rather than M2's string inequality).
+  M3's real Result/Runtime Observation binding makes this possible but does not implement it.
 - #4 deterministic orchestration after replay/authoritative state is stable (M6 — retry/
   repair/replan, fan-in, safe parallelism, multi-task DAG, Reviewer/Verifier split per
-  ADR-0009).
-- #6 context compilation (M4) and #24 skill supply-chain (M9) after core Kernel/runtime
-  boundaries are executable.
+  ADR-0009; also where M3's per-task capability-requirement gap above likely gets closed).
+- #24 skill supply-chain (M9) after core Kernel/runtime boundaries are executable.
 - #9/#25 compatibility registry, historical cross-version rule provenance, retained-lineage
   replay, and reader/rule retirement reachability remain M7/real-cross-version-edge work.
+- additional runtime adapters (M8) built against M3's `RuntimeCapabilityProfile`/
+  containment/redaction primitives — cross-runtime canonical-action conformance matrix.
