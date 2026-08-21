@@ -73,19 +73,23 @@ Observation and real output-snapshot provenance** — not that runtime execution
 not that context is real, not that verification is hardened, not that orchestration expands
 beyond one task.
 
-"Honestly-labeled" is load-bearing after adversarial review (§13): M3 delivers **real
-process-boundary enforcement** for credentials (env allow-list) and external effects (empty
-`external_effects` envelope, request rejection), and **real policy-admission enforcement**
-(fail-closed `admit_attempt`, capability `require()`) for everything else. It does **not**
-deliver real interception of network calls or of filesystem writes/process spawns beyond
-declared candidate paths — pure-Python subprocess wrapping cannot observe or block a child's
-`socket()`/`open()`/`fork()` calls, and no real sandbox (seccomp/`sandbox-exec`/namespaces)
-is in scope this milestone. Per `security-and-data-boundaries.md`'s own rule ("if a runtime
-cannot enforce a required denial/isolation boundary, that runtime is not admissible for the
-Attempt"), M3 profiles these axes `PARTIAL`/`UNKNOWN` rather than `SUPPORTED`, so an Attempt
-that actually *requires* network or filesystem/process isolation is rejected by
-`RuntimeCapabilityProfile.require(...)` rather than executed under a false enforcement
-claim.
+"Honestly-labeled" is load-bearing after adversarial review (§13, §14): M3 delivers **real
+process-boundary enforcement** for credentials only (env allow-list — the child process
+environment is built from scratch, so an unlisted ambient secret is genuinely invisible to
+it). External effects get **real declarative admission rejection** (empty
+`external_effects` envelope, any `requested_effects` fails `admit_attempt` before spawn) but
+**not** a process-boundary control — the spawned OpenCode process/shell is not prevented
+from directly invoking `git push`/`gh`/`curl` (§14 correction). Everything else gets **real
+policy-admission enforcement** (fail-closed `admit_attempt`, capability `require()`) only.
+M3 does **not** deliver real interception of network calls or of filesystem writes/process
+spawns beyond declared candidate paths — pure-Python subprocess wrapping cannot observe or
+block a child's `socket()`/`open()`/`fork()` calls, and no real sandbox (seccomp/
+`sandbox-exec`/namespaces) is in scope this milestone. Per `security-and-data-
+boundaries.md`'s own rule ("if a runtime cannot enforce a required denial/isolation
+boundary, that runtime is not admissible for the Attempt"), M3 profiles these axes
+`PARTIAL`/`UNKNOWN` rather than `SUPPORTED`, so an Attempt that actually *requires* network
+or filesystem/process isolation is rejected by `RuntimeCapabilityProfile.require(...)`
+rather than executed under a false enforcement claim.
 
 ```text
 Attempt Packet (published)
@@ -131,9 +135,19 @@ snapshot identity is a deterministic digest over, in canonical field order:
   that passes a different list at compile time vs. execute time is caught by the same
   staleness check as any other delta — but two independent drivers using different
   conventions would legitimately diverge. Binding this to a real contract field is deferred
-  to M4's Context Pack.
-- nested-repository / submodule roots: represented by their own resolved commit id, not
-  descended into recursively (a nested repo is a boundary, not flattened content)
+  to M4's Context Pack. **Corrected after PR review (§14):** each declared path's own
+  file/symlink/absent state is hashed — not merely the path name. A first pass hashed only
+  the sorted name list, so a Git-ignored generated artifact (the common case for build
+  output) could be created, edited, or deleted with no digest change at all, letting distinct
+  Result content share one `output_snapshot_digest`.
+- nested-repository / submodule roots: **corrected after PR review (§14)** — each nested
+  root's identity recurses through its own full `snapshot_identity` (its HEAD commit plus its
+  own staged/unstaged/untracked/further-nested state), not merely its commit id. A first pass
+  bound only path + commit, so uncommitted changes inside a nested worktree never changed the
+  outer digest even though the runtime can read/write that content. Recursion is bounded by
+  the real, finite nesting depth of the worktree tree — a nested repo is still a boundary
+  (not flattened into the outer repo's own staged/unstaged/untracked state), but its own
+  effective state is no longer invisible.
 
 `snapshot_identity(root: Path, declared_generated_paths: tuple[str, ...] = ()) ->
 WorkspaceSnapshot` returns a frozen dataclass with a `.digest` content-digest property
@@ -210,13 +224,29 @@ New module: `product/src/execution/opencode_adapter.py`.
 RuntimeCapabilityProfile`:
 
 1. Resolves the OpenCode binary path and version (`opencode --version` or equivalent
-   deterministic query); `runtime` field is `f"opencode@{version}"`.
+   deterministic query); `runtime` field is `f"opencode@{version}+{binary_digest}"`.
+   **Corrected after PR review (§14):** the version string alone is not identity — a binary
+   replaced in place with different code reporting the same `--version` would pass the
+   Host's no-silent-substitution recheck unnoticed. `binary_digest` is a content digest of
+   the resolved executable's actual bytes, folded into `runtime` (not a new profile field —
+   `RuntimeCapabilityProfile`'s schema is frozen M0-era shape) so a substituted binary is
+   caught by the identity checks that already exist end to end.
 2. Resolves effective configuration by reading OpenCode's actual config precedence order
    (project config -> global config -> environment/CLI overrides, whatever OpenCode's own
    documented resolution order is) and computing `config_identity` as
    `content_digest(effective_config_dict)` — the *merged* result, not just the project
    file, so drift in an inherited/default layer is visible (roadmap bullet: "inherited/
-   default permissions must not widen the admitted envelope").
+   default permissions must not widen the admitted envelope"). Callers merging multiple
+   layers pass them **most general/inherited first, most specific last** — later layers
+   override earlier ones (an earlier draft of this doc stated the calling convention
+   backwards, which would have let an inherited/global layer silently win over a
+   project-specific one; corrected in §14). **Known unenforceable gap, documented honestly:**
+   OpenCode's CLI has no flag to pin a spawned process to exactly this probed/merged
+   configuration or to suppress its own further discovery of an unprobed global/default
+   layer at spawn time — the Host pins only the *project*-layer config by launching OpenCode
+   with `cwd` set to the exact resolved workspace root this profile was probed against; the
+   global/inherited layer's actual use by the live process is unproven, same enforceability
+   class as network denial (§2/§6), not falsely claimed as proven.
 3. Resolves the canonical-action -> OpenCode-tool mapping table this adapter declares and
    computes `tool_mapping_identity` the same way.
 4. Declares `capabilities` (`Capability(name, status)`) only for canonical actions this
@@ -261,12 +291,40 @@ simplest mechanism that closes the demonstrated gap (AGENTS.md rule 13) — a re
 per-task policy derivation belongs to M4 (Context Compiler-adjacent) or M6 (real
 orchestration), not invented here.
 
+**Corrected after PR review (§14) — staleness closure without a contract change:**
+`M3_ADMITTED_PERMISSIONS` drift was already implicitly caught (the adapter's resolved
+`permission_envelope` is part of `RuntimeCapabilityProfile.to_canonical_value()`, so a
+permissions-table change already changes `profile.identity`), but
+`M3_REQUIRED_CAPABILITIES` was not bound to anything at all — a future change to that table
+could execute an already-published, older Attempt Packet under different requirements with
+no staleness mismatch. Both constants are now digested into `config_identity` (§5), so a
+policy-table change changes `RuntimeCapabilityProfile.identity` and the Host's existing
+execution-time recheck rejects stale attempts automatically.
+
+**Accepted scope limit, stated explicitly (not solved here):** because the fixed policy
+table is global rather than bound to the specific published task, M3 cannot express "this
+particular task requires network/filesystem/process isolation as a guarantee" — every M3
+Attempt is admitted against the same uniform requirement set. This is consistent with M3's
+own scope (the plan's single fixed one-task shape throughout this document), not a
+per-task differentiation system; real per-task/per-role capability requirements are M4
+(Context Compiler-adjacent) or M6 (real orchestration) territory, where task variability
+first becomes real.
+
 ## 6. Deny-first execution
 
 New module: `product/src/execution/host.py`.
 
 `execute(attempt_ref: RecordRef, attempt: AttemptPacketV1, workspace_root: Path,
-declared_generated_paths: tuple[str, ...]) -> ResultV1`:
+opencode_binary_path: str, task: TaskV1, config_paths: tuple[Path, ...] = (),
+declared_generated_paths: tuple[str, ...] = (), *, retain_evidence: bool = False,
+requested_effects: tuple[str, ...] = ()) -> ResultV1`. **Signature corrected after PR review
+(§14):** an earlier draft omitted `task` entirely — the Host spawned OpenCode with no
+objective/acceptance-criteria information at all, so the runtime succeeded independently of
+what was actually admitted; the E2E chain proved protocol wiring only, not that the
+published task reached execution. `task` is the authoritative `TaskV1` the driver already
+holds (the same value bound into the published Workflow Revision), rendered as the
+runtime's `run` message — mirroring OpenCode's own `run [message..]` positional-argument
+shape — not arbitrary compiled context (that stays M4 scope).
 
 1. Recompute `workspace_snapshot_identity` (§3) at execute-time; reject if it doesn't equal
    `attempt.workspace_snapshot_digest` (stale compiled state) —
@@ -319,22 +377,34 @@ declared_generated_paths: tuple[str, ...]) -> ResultV1`:
      parent constructs the child's `env` argument from scratch, so an unlisted ambient
      secret is genuinely never visible to the child process (closes the issue #8 "secrets
      exposed via ambient env" failure mode by omission, not detection).
-   - external effects (**real process-boundary + policy enforcement**):
-     `permission_envelope.external_effects` stays empty for every M3 fixture/adapter path
-     (§5.1's fixed policy); M3 implements no push/PR/merge/deploy capability at all, so
-     there is no code path that could perform one — any attempt to request one is rejected
-     the same way `admission.py`'s existing `_effects_are_admitted` already fails closed.
+   - external effects (**declarative admission rejection only, not a process-boundary
+     control — corrected after PR review, §14**): `permission_envelope.external_effects`
+     stays empty for every M3 fixture/adapter path (§5.1's fixed policy); a caller expressing
+     `requested_effects` (reachable through `execute`'s own parameter, not only constructible
+     directly on `AttemptRequest` as an earlier draft left it) is rejected by
+     `admission.py`'s existing `_effects_are_admitted` before spawn. This is real admission-
+     level rejection, but it is **not** a process-boundary control: the spawned OpenCode
+     process, and any shell/tool it invokes, is not prevented from directly calling
+     `git push`/`gh`/`curl`/an equivalent client — same unenforced-at-process-level class as
+     network denial above, not the stronger claim an earlier draft made.
 5. Every capability this milestone cannot really enforce (network, filesystem/process
    interception beyond declared scope) is declared `PARTIAL` or `UNKNOWN` in the profile
    (§5.4), so `RuntimeCapabilityProfile.require(...)` already fails closed if an Attempt
    requires it — the profile's honesty *is* the control for those axes, and no separate
    enforcement code is invented to paper over what the runtime genuinely cannot guarantee.
+5.5. **Corrected after PR review (§14) — a nonzero exit is a real failure, not a discarded
+   signal:** "exit code alone does not establish completion" (step 6 below) means a *zero*
+   exit / success-claiming stdout is not trusted as proof of success — it never meant a
+   nonzero exit should be silently ignored. If the spawned process exits non-zero, `execute`
+   raises before building any Result; a crashed/erroring runtime process must not be
+   packaged into a Result whose digest happens to reflect unchanged workspace state.
 6. Recompute `workspace_snapshot_identity` (§3) at completion — this becomes
    `output_snapshot_digest`. **Runtime exit code / stdout alone never establishes
-   completion** (roadmap exit bullet): the Result's snapshot identity is derived from
-   actual post-execution workspace state, independent of what OpenCode printed or returned.
-7. Build `RuntimeObservationV1(runtime_identity=<live profile's f"opencode@{version}">,
-   output_snapshot_digest=<step 6>)` and `ResultV1(attempt=attempt_ref,
+   completion** (roadmap exit bullet): a zero exit's Result identity is derived from
+   actual post-execution workspace state, independent of what OpenCode printed or returned
+   (a nonzero exit is handled by step 5.5 above, before this recompute matters).
+7. Build `RuntimeObservationV1(runtime_identity=<live profile's f"opencode@{version}+
+   {binary_digest}">, output_snapshot_digest=<step 6>)` and `ResultV1(attempt=attempt_ref,
    output_snapshot_digest=<step 6>, observation=...)` — same shape M2 already defined; only
    the values are now real.
 
@@ -346,16 +416,28 @@ path unmodified.
 
 New module: `product/src/execution/redaction.py`.
 
-`scan_for_retention(text: str) -> RedactionResult` — a minimal deterministic canary-pattern
-scanner (not a sophisticated classification taxonomy, explicitly deferred per roadmap):
-fixed regex set for common high-confidence secret shapes (e.g. `AKIA[0-9A-Z]{16}`-style AWS
-key prefixes, `-----BEGIN...PRIVATE KEY-----` PEM blocks, bearer-token-shaped long
-high-entropy strings following a `token`/`secret`/`key`/`password` label). Returns
-`status: "passed" | "blocked" | "unknown"` — `unknown` when the scanner cannot make a
-confident determination (e.g. binary/non-UTF8 content), and `unknown`/`blocked` both count
-as "not passed" for `admission.py`'s existing `retain_evidence and redaction_status !=
-"passed"` fail-closed check (already wired, unused until now because M2 never set
-`retain_evidence=True`).
+`scan_for_retention(text: str | None) -> RedactionResult` — a minimal deterministic
+canary-pattern scanner (not a sophisticated classification taxonomy, explicitly deferred per
+roadmap): fixed regex set for common high-confidence secret shapes (e.g.
+`AKIA[0-9A-Z]{16}`-style AWS key prefixes, `-----BEGIN...PRIVATE KEY-----` PEM blocks,
+bearer-token-shaped long high-entropy strings following a `token`/`secret`/`key`/`password`
+label). Returns `status: "passed" | "blocked" | "unknown"` — `unknown` for `None` input
+(the caller's signal that content could not be decoded as UTF-8), and `unknown`/`blocked`
+both count as "not passed."
+
+**Two distinct gates, corrected after PR review (§14) to avoid an impossible ordering:** an
+earlier draft implied `host.execute` reuses `admission.admit_attempt`'s pre-spawn
+`retain_evidence`/`redaction_status` check for captured stdout/stderr — impossible, since
+`admit_attempt` runs *before* the subprocess spawns (§6 step 3), while stdout/stderr exist
+only *after* it returns (§6 step 4). The two mechanisms stay genuinely separate: (1)
+`admission.py`'s existing `retain_evidence and redaction_status != "passed"` check is a
+pre-spawn admission gate for evidence a caller already has in hand *before* execution (still
+directly exercised by its own test, independent of stdout); (2) `host.execute`'s own
+post-capture gate scans stdout/stderr *after* the subprocess returns and, on `blocked`/
+`unknown`, raises `RetentionBlockedError` before building a `ResultV1` — an execution-layer
+rejection (§6's error class), not a `PublishRejectionCode`. Subprocess output is captured as
+raw bytes and decoded under Host control; a decode failure passes `None` to
+`scan_for_retention` rather than crashing.
 
 **Retained-surface scope, stated explicitly (per adversarial review, §13 MEDIUM 4):**
 `ResultV1` (`protocol_v1.py`) carries only `RecordRef`s and digests — no stdout/stderr text
@@ -365,9 +447,10 @@ stdout/stderr **that a driver chooses to pass into the gate before logging/persi
 outside the Kernel lineage** (e.g. a local debug log a driver writes) — not "any
 produced-artifact text" in general, which would drift toward M9's classification taxonomy.
 `host.execute` runs `scan_for_retention` over captured stdout/stderr only, at the point
-`retain_evidence=True` is requested by the caller (via `admission.AttemptRequest`); on
-`blocked`/`unknown`, the Attempt fails closed (`admission.py`'s existing
-`redaction_not_proven` check) rather than retaining unredacted content anywhere. This keeps
+`retain_evidence=True` is requested by the caller (an `execute` parameter, not
+`admission.AttemptRequest` — see the two-gate correction above); on `blocked`/`unknown`, the
+Attempt fails closed (`RetentionBlockedError`, an execution-layer error, §6) rather than
+retaining unredacted content anywhere. This keeps
 the gate meaningful rather than vacuously passing because nothing is retained: the exit-gate
 claim (§11) is scoped to "captured stdout/stderr, when `retain_evidence=True` is
 requested," not to record JSON (which never carries raw text) or to a broader
@@ -576,13 +659,15 @@ M3 may be checked in Issue #34 only when all are true:
   widen filesystem/network/process/credential/external-effect authority. `admitted_
   permissions`/`required_capabilities` are bound to the fixed §5.1 policy table, not to an
   unbound driver-supplied value.
-- Runtime exit code/stdout cannot by itself establish completion — `output_snapshot_digest`
-  is derived from actual post-execution Workspace Snapshot state (§6.6, §9 fixture).
-- Credential denial (ambient env not inherited) and external-effect denial (empty envelope,
-  request rejection) are real process-boundary controls, proven by fixture (§9). Network and
-  filesystem/process-interception-beyond-declared-scope are **not** claimed as enforced —
-  this gate does not require a network-blocking fixture, only the capability-admission
-  rejection fixture (§9).
+- Runtime exit code/stdout cannot by itself establish completion — a zero exit's
+  `output_snapshot_digest` is derived from actual post-execution Workspace Snapshot state
+  (§6.6, §9 fixture); a nonzero exit raises before any Result is built (§6 step 5.5, §14).
+- Credential denial (ambient env not inherited) is a real process-boundary control, proven
+  by fixture (§9). External-effect denial is real declarative admission rejection, reachable
+  through `execute`'s own `requested_effects` parameter, but **not** a process-boundary
+  control (§14 correction). Network and filesystem/process-interception-beyond-declared-
+  scope are **not** claimed as enforced — this gate does not require a network-blocking
+  fixture, only the capability-admission rejection fixture (§9).
 - Retained canary secret fixtures (captured stdout/stderr, when `retain_evidence=True`) are
   detected and never persist raw secret material anywhere the gate covers (§7, §9); the gate
   does not claim to cover a broader "any produced-artifact text" surface.
@@ -687,3 +772,73 @@ in). Findings and how each was resolved in this revision:
   at the top of this doc; untracked-file hashing bound/symlink-safety left as a §9
   implementation note for PR1 (skip symlink targets or hash the link string, not unbounded
   dereferenced content).
+
+## 14. Second-round PR review fixes (implementation-phase)
+
+After PR #45 (implementation) and this plan's own PR #44 were opened, the repository owner
+and an automated reviewer (`chatgpt-codex-connector`) left adversarial findings against both
+the plan and the shipped code. All P1 findings were investigated against the actual
+committed code (not assumed correct) and either fixed or explicitly, honestly deferred.
+Findings and resolutions, consolidated (individual sections above carry inline
+"corrected after PR review (§14)" pointers at the exact claim each fix touches):
+
+- **Generated-output content not hashed** — `generated_digest` hashed only declared path
+  names; a Git-ignored artifact could change with no digest change. Fixed: each path's own
+  file/symlink/absent state is hashed (§3).
+- **Nested-repository dirty state invisible** — nested identity bound only path + HEAD
+  commit; uncommitted content inside a nested worktree never changed the outer digest.
+  Fixed: nested identity recurses through the nested repo's own full `snapshot_identity`
+  (§3).
+- **Symlink-loop containment platform/version dependence** — `Path.resolve(strict=False)`'s
+  loop-handling behavior is not guaranteed identical across Python versions/platforms.
+  Hardened with an explicit, version-independent bounded symlink-chain walk before `resolve`
+  (§4); this repository's own test suite already passed the cited case, so this is
+  defense-in-depth, not a regression fix.
+- **Runtime profile bound only to a reported version string** — a binary substituted in
+  place with different code reporting the same `--version` would pass the no-silent-
+  substitution recheck. Fixed: a content digest of the executable's actual bytes is folded
+  into `runtime` (§5).
+- **`M3_REQUIRED_CAPABILITIES`/`M3_ADMITTED_PERMISSIONS` not bound to attempt/profile
+  identity** — a future policy-table change could execute an old Attempt Packet under
+  different requirements with no staleness mismatch. Fixed: both folded into
+  `config_identity`, so a policy change changes `RuntimeCapabilityProfile.identity` and the
+  Host's existing execution-time recheck catches drift (§5.1). The narrower "M3 cannot
+  express per-task capability requirements" limitation is accepted scope, stated explicitly,
+  not solved — see §5.1's closing note.
+- **Config precedence documented (and thus exercisable) backwards** — "pass specific first,
+  inherited/global last" combined with "later overrides earlier" would let an inherited
+  layer silently win. Fixed: corrected calling convention (general-first, specific-last);
+  locked in by a new test (§5).
+- **Config provenance not proven to match the spawned process** — the probe reads
+  `config_paths`, but OpenCode's CLI has no flag to pin a live process to exactly that
+  merged view or suppress its own further global-config discovery. **Not solved** — documented
+  honestly as the same unenforceable-at-process-level class as network denial; the Host pins
+  only the project-layer config via `cwd` (§5).
+- **Host never received or passed the task to the runtime** — `execute` took no `task`
+  parameter at all, so the fake (and any real) runtime succeeded independently of what was
+  actually admitted; the E2E chain proved protocol wiring only. Fixed: `execute` now takes
+  the authoritative `TaskV1` and renders it as the runtime's `run` message (§6, §8).
+- **Failed runtime process still produced a successful Result** — `subprocess.run(...,
+  check=False)` discarded the exit code entirely. Fixed: a nonzero exit raises before any
+  Result is built; the existing "exit code alone doesn't establish completion" claim always
+  meant *zero* exit isn't trusted, never that a crash is discarded (§6 step 5.5).
+- **External-effect denial overclaimed as process-boundary control** — declarative admission
+  rejection is real, but the spawned OpenCode process/shell was never actually prevented
+  from calling `git push`/`gh`/`curl` directly, and `requested_effects` was not even
+  reachable from `execute()` in the first shipped draft. Fixed: `requested_effects` is now a
+  real `execute()` parameter; the claim is relabeled to match network denial's honesty level
+  (§6 step 4).
+- **Redaction gate ordering was impossible as documented** — an earlier draft implied reuse
+  of `admission.admit_attempt`'s pre-spawn `retain_evidence`/`redaction_status` check for
+  stdout/stderr, which cannot work since output doesn't exist until after spawn. Fixed:
+  documented as two genuinely separate gates — the pre-spawn admission check (unchanged,
+  still directly tested) and `host.execute`'s own post-capture gate (§7).
+- **Non-UTF8 captured output would crash instead of degrading to "unknown"** —
+  `subprocess.run(text=True)` decodes before `scan_for_retention` ever runs. Fixed: bytes
+  are captured and decoded under Host control; a decode failure passes `None` to
+  `scan_for_retention`, which resolves `"unknown"` and still blocks retention rather than
+  raising (§6, §7).
+
+Full regression (contracts/kernel/execution/verification suites + `compileall`) stayed green
+throughout this round; new fixtures/tests were added alongside each fix rather than only
+adjusting existing assertions, so each finding has a test that would have caught it.
