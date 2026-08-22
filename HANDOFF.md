@@ -100,12 +100,27 @@ coverage was lost by retiring the stub-era duplicate (see PR7b in the plan's §1
 
 ## Next session — fixed scope
 
-**Plan M4** per [`mvp-implementation-roadmap.md`](docs/plans/active/mvp-implementation-roadmap.md)
-line 237 ("M4 — Deterministic Context Compiler"), then implement it. No M4 plan doc exists
-yet — start there, following the same process M1/M2/M3 used: design doc, adversarial review
-(consider a **second** review round after implementation too, not only before — this
-session's second round caught 14 real defects a single pre-implementation review missed),
-then dispatch implementation.
+**M4 plan doc written and adversarially hardened this session**:
+[`m4-deterministic-context-compiler.md`](docs/plans/active/m4-deterministic-context-compiler.md).
+Reviewed by `glm-5.3` (effort high, via opencode) against roadmap §3's five lenses plus
+targeted attacks on the freshness/staleness design, the content/authority boundary, and the
+budget math — found no BLOCKER but 5 HIGH, 4 MEDIUM, 5 LOW real defects (plan §13), all
+fixed inline in §§3–11 (not deferred): the third freshness recheck was reframed from a
+near-tautological same-input recompute into real compile/execute parameter-consistency
+binding plus authoritative task re-derivation (§6); `build_attempt_packet`/`execute` gained
+real `task`/`contract_refs` parameters and a compile-time+execute-time binding check
+against the published Workflow Revision's task digest, closing a caller-trust-only gap
+(§10.2); contract-ref dedup now keys on the full `RecordRef` triple and fail-closed rejects
+same-id-different-digest conflicts instead of silently picking one (§4); the reserved-cost
+disclosure identity is now digest-covered so renderer-template drift actually changes
+`context_digest` (§3, §5.2); the budget-exceeded predicate now covers required+reserved,
+not required alone (§5.3); §8's storage section was rewritten from scratch — M3 never
+actually had an evidence-store pattern to mirror, so a concrete location
+(`{state_dir}/context-evidence/`, sibling to the Kernel lineage store's `runs/` tree, never
+inside a managed workspace) and atomic-write mechanism are now specified. Next session:
+implement per §10's order, then run a **second** adversarial review round after
+implementation too, not only before — M3's second round caught 14 more real defects a
+single pre-implementation review missed; expect the same here.
 
 This session's design grilling (before any M4 code) settled the following scope decisions —
 follow them rather than re-deriving:
