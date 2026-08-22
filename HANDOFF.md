@@ -107,6 +107,41 @@ yet — start there, following the same process M1/M2/M3 used: design doc, adver
 session's second round caught 14 real defects a single pre-implementation review missed),
 then dispatch implementation.
 
+This session's design grilling (before any M4 code) settled the following scope decisions —
+follow them rather than re-deriving:
+
+- source-class taxonomy (control/lineage/observed/derived) implemented structurally now even
+  though the lineage class stays empty until M7's real orchestration gives it predecessors —
+  forward-compatible shape, no behavior yet
+- candidate set stays limited to what's already real: Task objective/AC, admitted decision/
+  contract refs, `WorkspaceSnapshot` identity, `RuntimeCapabilityProfile` identity — no new
+  repository-file discovery/selection subsystem (YAGNI per AGENTS.md rule 9, mirrors M3's
+  empty `M3_REQUIRED_CAPABILITIES` precedent); shuffle-order/determinism exit evidence is
+  proven over this finite set (reuse `runtime_capability.py`'s `_utf16_sort_key` pattern), not
+  over filesystem/API enumeration that doesn't exist in scope
+- Context Pack follows M3's pattern: a computed value, identity embedded into (repurposed)
+  `AttemptPacketV1.context_digest`, full structured pack kept as evidence alongside — no new
+  Kernel-published record type
+- token/cost estimator is a deterministic placeholder (byte-length based), versioned
+  (`estimator_name@revision`) like everything else here — a real tokenizer is a runtime/model
+  decision outside M4's boundary; only the identity binding needs to be real now
+- `host.execute()`'s OpenCode `run`-message rendering gets wired to the real Context Pack (not
+  left as an unused struct) — labeled sections per source class so the authority/data boundary
+  survives rendering, per issue #6's "renderer must preserve a hard boundary" finding
+- `CONTEXT_BUDGET_EXCEEDED` is a new exception type mirroring `CapabilityAdmissionError`
+  (`kernel/runtime_capability.py`), raised during compile before packet construction — blocks
+  packet creation entirely, no runnable partial packet
+- runtime disclosure-profile identity/reserved-cost is a separate lightweight identity computed
+  in the M4 module, not a new `RuntimeCapabilityProfile` field (avoids M3 schema churn), but
+  re-verified at `execute()` time the same way M3 re-verifies profile identity on drift
+- evaluated and declined migrating `opencode-orchestrated-agent-workflow`'s runtime/
+  adapter/transport code directly: different language (Node.js vs this repo's Python kernel),
+  different protocol shape (its own Task Packet/bootstrap envelope vs this repo's
+  `AttemptPacketV1`/`RecordRef`), and its own research note already flags a core state-model
+  conflict (mutable `run.json` vs this repo's event-authority Kernel-publish model). Interface-
+  level reference only, same as the existing `docs/research/` adoption process — no code/
+  runtime dependency on that sibling repo.
+
 M4 replaces M2's opaque `AttemptPacketV1.context_digest` fixture field with a real,
 structured Context Pack, compiled deterministically over exactly the admitted task/lineage/
 source identities:
@@ -126,8 +161,8 @@ source identities:
 
 Start in-process. Do not create a Context service.
 
-**Non-goals for M4:** all runtimes beyond OpenCode (M8), release automation, hardened
-criterion/evidence policy (M5), orchestration expansion (M6). Reuse M3's real
+**Non-goals for M4:** all runtimes beyond OpenCode (M9), release automation, hardened
+criterion/evidence policy (M6), orchestration expansion (M7). Reuse M3's real
 `RuntimeCapabilityProfile`/`workspace_snapshot` primitives rather than inventing parallel
 freshness/identity machinery.
 
@@ -139,6 +174,26 @@ produces no runnable Attempt; disclosure drift after compilation rejects or reco
 rather than silently expanding context.
 
 Primary issue: #6, with security overlap in #8.
+
+**New milestone inserted after M4, before verification hardening**: this session added
+[`M5 — Cross-project failure-mode ledger`](docs/plans/active/mvp-implementation-roadmap.md)
+(tracking [Issue #46](https://github.com/hjung3113/agent-platform/issues/46)), so the old
+M5-M9 became M6-M10 — a genuine renumber, not a new milestone silently taking an old number.
+It mines sibling repos' own git history/issues/PRs (git-log/issue/PR failure-mode pass first,
+then PR body/diff on flagged items only) for concrete failure/regression/bug records — not
+design-pattern adoption, which `docs/research/adoption-ledger.md` already covers — producing
+a new `docs/research/failure-mode-ledger.md` that feeds M6's adversarial review before M6
+design starts. Full mining scope: `opencode-orchestrated-agent-workflow`,
+`agent-migration-pipeline`, `general-low-reasoning-agent-harness`, `thin-agent-harness`.
+`meta-prompting-skill` gets an applicability-only scan (conceptual repo, not a failure-mining
+target), not failure mining. Do M4 first, M5 gates M6.
+
+**Renumbering caveat**: only `mvp-implementation-roadmap.md` and this file were renumbered.
+The already-merged `docs/plans/active/m0`–`m3` plan docs still say "M5"/"M6"/etc. in their own
+historical rationale prose (dozens of occurrences, mostly embedded in analysis sentences, not
+headers) — deliberately left untouched as historical record rather than risking a wide,
+error-prone edit across merged docs. When reading those older plan docs, their M5–M9 mentions
+refer to the **old** numbering, one lower than the current roadmap for M6 onward.
 
 `AttemptPacketV1.context_digest` (currently `execution/attempt.py`'s M2-era
 `_fixture_digest("context", task_id)`, deliberately left untouched through M3) is M4's
@@ -154,7 +209,7 @@ need makes them load-bearing, per AGENTS.md rule 9 (YAGNI):
 - **Per-task capability-requirement differentiation.** M3's admission policy
   (`execution/policy.py`) is one fixed global table; it cannot express "this specific task
   requires network/filesystem/process isolation as a guarantee." Real per-task/per-role
-  requirement binding needs either a contract change or M6's real orchestration layer, where
+  requirement binding needs either a contract change or M7's real orchestration layer, where
   task variability first becomes real — M4's Context Compiler is not obviously the right
   place either, but check when M4 design starts.
 - **OpenCode global-config provenance.** `execution/opencode_adapter.py` probes and digests
@@ -173,11 +228,11 @@ need makes them load-bearing, per AGENTS.md rule 9 (YAGNI):
 - **External-effect denial is declarative admission rejection only**, not a process-boundary
   control — same document/enforcement-honesty class as network. `permission_envelope.
   external_effects` stays empty for every M3 path; real release/external-effect authorization
-  is M9 scope per the roadmap, unchanged.
+  is M10 scope per the roadmap, unchanged.
 
 ## Deferred until the corresponding gate
 
-### M7 / real cross-version edge or platform validation
+### M8 / real cross-version edge or platform validation
 
 - cross-platform (Windows/Linux) crash-consistency validation of the M1 store
 - compatibility registry, historical cross-version rule provenance, retained-lineage replay
@@ -193,14 +248,14 @@ need makes them load-bearing, per AGENTS.md rule 9 (YAGNI):
 ### Later milestones (unchanged from M0/M1/M2 handoff)
 
 - #5 verification/evidence soundness after authoritative lineage/snapshot bindings exist
-  (M5 — hardened criterion/evidence policy, execution-provenance independence,
+  (M6 — hardened criterion/evidence policy, execution-provenance independence,
   self-verification closed by real distinct identity rather than M2's string inequality).
   M3's real Result/Runtime Observation binding makes this possible but does not implement it.
-- #4 deterministic orchestration after replay/authoritative state is stable (M6 — retry/
+- #4 deterministic orchestration after replay/authoritative state is stable (M7 — retry/
   repair/replan, fan-in, safe parallelism, multi-task DAG, Reviewer/Verifier split per
   ADR-0009; also where M3's per-task capability-requirement gap above likely gets closed).
-- #24 skill supply-chain (M9) after core Kernel/runtime boundaries are executable.
+- #24 skill supply-chain (M10) after core Kernel/runtime boundaries are executable.
 - #9/#25 compatibility registry, historical cross-version rule provenance, retained-lineage
-  replay, and reader/rule retirement reachability remain M7/real-cross-version-edge work.
-- additional runtime adapters (M8) built against M3's `RuntimeCapabilityProfile`/
+  replay, and reader/rule retirement reachability remain M8/real-cross-version-edge work.
+- additional runtime adapters (M9) built against M3's `RuntimeCapabilityProfile`/
   containment/redaction primitives — cross-runtime canonical-action conformance matrix.

@@ -205,7 +205,7 @@ The stub Host is intentionally not a security proof. Its purpose is to close the
 
 **Goal:** replace the fake execution boundary with one enforceable runtime path without generalizing portability yet.
 
-**Default first runtime:** OpenCode. Additional runtimes remain deferred until M8.
+**Default first runtime:** OpenCode. Additional runtimes remain deferred until M9.
 
 **Implement:**
 
@@ -264,7 +264,35 @@ Start in-process. Do not create a Context service.
 
 ---
 
-### M5 — Verification hardening
+### M5 — Cross-project failure-mode ledger
+
+**Goal:** mine sibling repositories' own git history/issues/PRs for concrete failure/regression/bug records — not design-pattern adoption, which `docs/research/adoption-ledger.md` already covers — and turn them into a ledger that feeds the next milestone's adversarial review instead of rediscovering the same mistakes from scratch.
+
+**Method:**
+
+1. scan git log/issues/PRs per repo for failure, regression, and bug records first (titles/commit messages/labels only)
+2. for flagged items only, read the actual PR body/diff to extract root cause and the fix/improvement actually applied
+3. record source repo + commit/PR reference, failure mode, their fix, applicability to agent-platform (module/future milestone), status
+
+**Scope:**
+
+Full failure-mode mining — `opencode-orchestrated-agent-workflow`, `agent-migration-pipeline`, `general-low-reasoning-agent-harness`, `thin-agent-harness`.
+
+Applicability-only scan (conceptual repo, not a failure-mining target) — `meta-prompting-skill`: record current-project applicability only, not failure modes.
+
+**Deliverable:** new `docs/research/failure-mode-ledger.md`, separate from `adoption-ledger.md`.
+
+**Exit evidence:**
+
+- each of the 4 mining-scope repos shows scan evidence (git log/issue/PR pass completed)
+- meta-prompting-skill applicability note recorded
+- findings folded into M6's adversarial review checklist before M6 design starts
+
+**Primary issue:** #46.
+
+---
+
+### M6 — Verification hardening
 
 **Goal:** make terminal PASS depend on criterion-level admissible evidence, not on verifier prose.
 
@@ -292,7 +320,7 @@ Keep Reviewer and Verifier as one independent Verifier responsibility unless pol
 
 ---
 
-### M6 — Orchestration expansion
+### M7 — Orchestration expansion
 
 **Goal:** expand from the proven one-task state machine only as each additional orchestration behavior is needed.
 
@@ -323,7 +351,7 @@ Do not implement a later step merely because Spec 04 names it; each expansion mu
 
 ---
 
-### M7 — Protocol compatibility and recovery conformance
+### M8 — Protocol compatibility and recovery conformance
 
 **Goal:** prove that v1 history remains reproducible as the codebase evolves before a real v2 migration is required.
 
@@ -336,7 +364,7 @@ Do not implement a later step merely because Spec 04 names it; each expansion mu
 - reader/rule reachability checks before retirement
 - supported-platform crash/recovery validation matrix for the chosen persistence mechanism
 
-The reader-dispatch mechanism exists from M0; M7 hardens evolution behavior rather than inventing versioning late.
+The reader-dispatch mechanism exists from M0; M8 hardens evolution behavior rather than inventing versioning late.
 
 **Exit evidence:**
 
@@ -350,7 +378,7 @@ The reader-dispatch mechanism exists from M0; M7 hardens evolution behavior rath
 
 ---
 
-### M8 — Runtime portability and generated-runtime drift
+### M9 — Runtime portability and generated-runtime drift
 
 **Goal:** prove the canonical runtime-neutral contracts preserve meaning across additional supported runtimes.
 
@@ -375,7 +403,7 @@ The reader-dispatch mechanism exists from M0; M7 hardens evolution behavior rath
 
 ---
 
-### M9 — Managed skill supply chain and external-effect/release extensions
+### M10 — Managed skill supply chain and external-effect/release extensions
 
 **Goal:** add operational distribution/update machinery only after the Kernel/Host/context/verification foundations can enforce it.
 
@@ -407,11 +435,12 @@ M0 protocol foundation
       -> M2 one-task protocol E2E
           -> M3 real Host + first runtime
               -> M4 deterministic context
-                  -> M5 verification hardening
-                      -> M6 orchestration expansion
-                          -> M7 compatibility/recovery conformance
-                              -> M8 multi-runtime portability
-                                  -> M9 supply-chain/release extensions
+                  -> M5 cross-project failure-mode ledger
+                      -> M6 verification hardening
+                          -> M7 orchestration expansion
+                              -> M8 compatibility/recovery conformance
+                                  -> M9 multi-runtime portability
+                                      -> M10 supply-chain/release extensions
 ```
 
 This is the default implementation order. A later milestone may receive research, fixtures, or design clarification early, but **production implementation that depends on an unproven earlier invariant does not bypass the gate**.
