@@ -181,7 +181,15 @@ def run_one_task(
             attempt_value.runtime_capability_profile_identity, "v1"
         ),
     )
-    assert evidence_pack.digest == attempt_value.context_digest
+    if evidence_pack.digest != attempt_value.context_digest:
+        # Real invariant violation, not a debug-only guard (PR #47 review
+        # round 2 LOW 3 — a bare `assert` here vanishes under `python -O`,
+        # letting a divergent evidence file be written unverified).
+        raise RuntimeError(
+            "evidence-only recompile diverged from the published Attempt "
+            "Packet's context_digest: "
+            f"evidence={evidence_pack.digest} attempt={attempt_value.context_digest}"
+        )
     # Evidence is inspectable record-keeping only (execution/context_evidence.py's
     # own docstring): nothing depends on this file existing, so a storage
     # failure here must never abort an already-admitted, otherwise-successful

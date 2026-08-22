@@ -150,6 +150,45 @@ class ContextCompilerBudgetTest(unittest.TestCase):
             with self.assertRaises(CONTEXT_BUDGET_EXCEEDED):
                 compile_(contract_refs=(make_ref("r1", "d1"),))
 
+    def test_length_preserving_render_template_drift_changes_digest(self) -> None:
+        # PR #47 review round 2 MEDIUM 2: reserved_cost alone only reflects
+        # rendered LENGTH, so a same-length template edit (e.g. relabeling a
+        # section to different text of identical byte length) would be
+        # invisible to reserved_cost/context_digest without rendered_digest
+        # folding the actual rendered bytes in. Prove a same-length render
+        # change now changes ContextPack.digest.
+        import execution.context_compiler as cc
+
+        real_render = cc.render_context_pack
+        baseline = compile_()
+        baseline_rendered = real_render(baseline.units)
+
+        def same_length_different_render(units):
+            real = real_render(units)
+            # flip case on the first alphabetic char — identical byte length,
+            # different content.
+            for index, char in enumerate(real):
+                if char.isalpha():
+                    flipped = char.swapcase()
+                    drifted = real[:index] + flipped + real[index + 1 :]
+                    assert len(drifted.encode("utf-8")) == len(real.encode("utf-8"))
+                    return drifted
+            raise AssertionError("no alphabetic character found to flip")
+
+        drifted_rendered = same_length_different_render(baseline.units)
+        self.assertNotEqual(drifted_rendered, baseline_rendered)
+        self.assertEqual(
+            len(drifted_rendered.encode("utf-8")), len(baseline_rendered.encode("utf-8"))
+        )
+
+        with patch.object(cc, "render_context_pack", side_effect=same_length_different_render):
+            drifted_pack = compile_()
+
+        # Same reserved_cost (length-preserving) but a different digest.
+        self.assertEqual(drifted_pack.reserved_cost, baseline.reserved_cost)
+        self.assertNotEqual(drifted_pack.rendered_digest, baseline.rendered_digest)
+        self.assertNotEqual(drifted_pack.digest, baseline.digest)
+
     def test_budget_predicate_matches_real_rendered_message_size(self) -> None:
         # PR #47 review P1: the accounted total must equal the actual
         # rendered single-argv message size (plus the small fixed argv

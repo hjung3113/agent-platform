@@ -60,6 +60,7 @@ class ContextPack:
     optional_cost: int
     reserved_cost: int
     disclosure_identity: str
+    rendered_digest: str
     omitted: tuple[OmissionRecord, ...]
 
     def to_canonical_value(self) -> dict[str, Any]:
@@ -72,6 +73,7 @@ class ContextPack:
             "optional_cost": self.optional_cost,
             "reserved_cost": self.reserved_cost,
             "disclosure_identity": self.disclosure_identity,
+            "rendered_digest": self.rendered_digest,
             "omitted": [record.to_canonical_value() for record in self.omitted],
         }
 
@@ -81,7 +83,18 @@ class ContextPack:
 
 
 class CONTEXT_BUDGET_EXCEEDED(Exception):
-    """required_cost, or required_cost + reserved_cost with no optional unit able to absorb the excess, exceeds CONTEXT_BUDGET_MAX; no Context Pack is built."""
+    """required_cost + optional_cost + reserved_cost exceeds CONTEXT_BUDGET_MAX; no Context Pack is built.
+
+    No real M4 candidate is ever ``optional`` (§2/§9), so ``optional_cost``
+    is ``0`` on every real path today — this predicate is written as the
+    general sum, not specialized to "required alone", so it is already
+    correct if/when a later milestone adds real optional candidates. No
+    omission-selection logic exists yet to omit optional units and retry
+    under budget (PR #47 review round 2 LOW 2 — an earlier version of this
+    docstring implied that machinery exists; it does not, only the
+    ``OmissionRecord`` shape and an always-empty ``omitted=()`` do, as
+    forward-compatible scaffolding per HANDOFF's M4 design-grilling round 2).
+    """
 
     pass
 
@@ -324,6 +337,18 @@ def compile_context_pack(
             f"CONTEXT_BUDGET_MAX {CONTEXT_BUDGET_MAX}"
         )
 
+    # rendered_digest closes a gap reserved_cost alone leaves open (PR #47
+    # review round 2 MEDIUM 2): reserved_cost only reflects the rendered
+    # message's LENGTH, so a length-preserving edit to render_context_pack
+    # (e.g. relabeling a section to same-length different text) would
+    # change what the runtime actually receives on argv without changing
+    # required_cost/optional_cost/reserved_cost, and therefore without
+    # changing context_digest — invisible to every staleness check, caught
+    # only by developer discipline in bumping run_message_template_revision.
+    # Digesting the actual rendered bytes here means ANY change to the real
+    # spawn argv — length-changing or not — changes context_digest.
+    rendered_digest = content_digest(rendered_message)
+
     return ContextPack(
         task_id=task_id,
         units=tuple(units),
@@ -333,5 +358,6 @@ def compile_context_pack(
         optional_cost=optional_cost,
         reserved_cost=reserved_cost,
         disclosure_identity=disclosure_identity,
+        rendered_digest=rendered_digest,
         omitted=(),
     )

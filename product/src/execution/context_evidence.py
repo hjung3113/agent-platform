@@ -40,6 +40,13 @@ def write_context_evidence(state: str, attempt_record_id: str, pack: ContextPack
     )
     temp_path = Path(temp_name)
     try:
+        # mkstemp always creates its file mode 0600 (ignoring umask, by
+        # design) — chmod to the same 0644 lineage_store.append's plain
+        # open(..., "wb") produces under the common default umask, so
+        # evidence files land at the same permissions as the authoritative
+        # records they describe rather than being unreadable to any other
+        # account on the host (PR #47 review round 2 LOW 4).
+        os.chmod(temp_path, 0o644)
         with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
             temp_file.write(payload)
             temp_file.flush()

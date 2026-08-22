@@ -5,9 +5,11 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from kernel.canonical import content_digest
 from kernel.protocol_v1 import RequestV1, TaskV1
+from execution import run_one_task as run_one_task_module
 from execution.run_one_task import run_one_task
 from execution.workspace_snapshot import snapshot_identity
 
@@ -101,6 +103,42 @@ class ContextEvidenceTests(unittest.TestCase):
             snapshot_identity(self.workspace_root, ()).digest,
             snapshot_before.digest,
         )
+
+    def test_evidence_write_failure_does_not_abort_an_admitted_run(self) -> None:
+        # PR #47 review round 2 MEDIUM 3: run_one_task.py wraps the evidence
+        # write in try/except OSError specifically because evidence is
+        # documented non-authoritative record-keeping (context_evidence.py's
+        # own module docstring) — a storage failure must never abort an
+        # already-admitted, otherwise-successful run. Pin that behavior
+        # directly rather than relying on it never being exercised.
+        snapshot_before = snapshot_identity(self.workspace_root, ())
+
+        with mock.patch.object(
+            run_one_task_module,
+            "write_context_evidence",
+            side_effect=OSError("simulated evidence storage failure"),
+        ):
+            chain = run_one_task(
+                self.state,
+                REQUEST,
+                TASK,
+                self.workspace_root,
+                str(FIXTURE_BINARY),
+                implementer_identity="implementer-1",
+                verifier_identity="verifier-1",
+                expected_output_digest=snapshot_before.digest,
+            )
+
+        # The run completed to a Receipt despite the evidence write failing.
+        self.assertEqual(chain.verification_value.verdict, "PASS")
+        self.assertIsNotNone(chain.receipt)
+        # And, since the write never happened, no evidence file exists.
+        evidence_path = (
+            Path(self.state)
+            / "context-evidence"
+            / f"{chain.attempt.record_ref.record_id}.json"
+        )
+        self.assertFalse(evidence_path.exists())
 
 
 if __name__ == "__main__":
