@@ -200,6 +200,72 @@ refer to the **old** numbering, one lower than the current roadmap for M6 onward
 replacement target — decide how much of the fixture's shape (a single opaque digest field on
 the packet) survives versus needs a real structured Context Pack reference.
 
+## M4 design grilling round 2 — settled, plan doc not yet written
+
+Continuation of the scope decisions above. Next session: write
+`docs/plans/active/m4-deterministic-context-compiler.md`, adversarial-review it
+(`glm-5.3`, effort high, via opencode) before implementation starts, harden, then dispatch
+implementation — identical process to M1/M2/M3, including a second post-implementation
+review round. Follow these settled decisions rather than re-deriving:
+
+- **Freshness**: M3's `host.execute()` already rechecks `workspace_snapshot_digest`/
+  `runtime_capability_profile_identity` pre-spawn (`host.py:224-238`). M4 adds a **third**
+  recheck on the compiler itself — `StaleContextPackError`, recompute+compare
+  `context_digest` pre-spawn — rather than relying on transitive freshness through the other
+  two. Catches compiler nondeterminism bugs directly.
+- **Required/optional**: every real M4 candidate (Task objective/AC, admitted decision/
+  contract refs, WorkspaceSnapshot identity, RuntimeCapabilityProfile identity) is
+  `required` — no real truncation happens in M4. The optional/omission/truncation machinery
+  is still built now (forward-compatible shape, same YAGNI precedent as
+  `M3_REQUIRED_CAPABILITIES = ()`), exercised only by synthetic test fixtures, not real data.
+- **Dedup/ordering scope**: the only order-ambiguous plural item is the admitted decision/
+  contract-refs list (0+ refs). Task/WorkspaceSnapshot/RuntimeCapabilityProfile are each a
+  single fixed slot — no ordering logic needed for them. Dedup/sort reuses
+  `runtime_capability.py`'s `_utf16_sort_key` pattern, scoped only to contract-ref
+  identifiers — no general multi-source merge utility.
+- **Adversarial fixture, built now not deferred**: even though observed/lineage source
+  classes stay empty until M7, build a fixture today with fake-directive text inside Task
+  `objective`/`acceptance_criteria` (control-class, already-trusted) — assert the compiled
+  pack treats it as inert string content that never reaches any policy/admission/verdict
+  path. Cheapest present-day proof of the content/authority boundary.
+- **ContextUnit concrete shape** (confirmed):
+  ```
+  @dataclass(frozen=True)
+  class ContextUnit:
+      source_class: str        # "control" | "lineage" | "observed" | "derived"
+      source_identity: str      # e.g. "task:<task_id>", "workspace_snapshot",
+                                  # "runtime_capability_profile", "contract_ref:<record_id>"
+      scope: str                 # e.g. "task.objective", "task.acceptance_criteria"
+      inclusion_reason: str
+      requirement: str           # "required" | "optional"
+      content: str | bytes       # actual disclosed content, not just a digest
+      content_digest: str
+      estimated_cost: int        # abstract estimator-cost units (currently byte-length based)
+  ```
+  `content` is real, not digest-only-with-lazy-resolution — the compiler needs actual text to
+  render into the OpenCode `run` message, not just an identity anchor.
+- **Budget unit**: abstract cost units from `estimator_name@revision`, not raw bytes directly
+  — byte-length is just the current estimator's implementation; a future estimator swap
+  changes the number without changing the budget contract's shape.
+- **Budget limit source**: a single fixed constant in the M4 module (e.g.
+  `CONTEXT_BUDGET_MAX`), same shape as M3's one global policy table — not a per-task/
+  per-compilation threaded input. Revisit only if M7 orchestration makes per-task budgets
+  load-bearing.
+- **Reserved-cost meaning**: a lightweight identity `{runtime_identity, run-message-template-
+  revision}` plus a reserved byte-cost for OpenCode's own `run`-message envelope overhead
+  only (`host.py`'s `_task_message` wrapping, not Context Pack content) — total budget =
+  required+optional pack cost + this reserved cost. No safety-margin buffer for the
+  runtime's own unknowable system-prompt size; that's genuinely out of this repo's
+  visibility, not estimated.
+- **Disclosure drift handling**: hard reject only — a `StaleContextPackError`-class
+  exception, mirroring M3's fail-closed stale-identity handling
+  (`StaleWorkspaceSnapshotError` etc. are raised, never auto-healed). No silent
+  auto-recompile path inside `execute()`.
+- **Context Pack storage**: a new evidence file per Attempt, mirroring M3's evidence-store
+  pattern (e.g. alongside `RuntimeCapabilityProfile` evidence) — digest embedded into
+  `AttemptPacketV1.context_digest`, full structured pack kept as the evidence file's content,
+  not recomputed on demand and not left unstored.
+
 ## Explicit scope limits carried forward from M3 (not gaps to silently close in M4)
 
 These were investigated during M3's second review round and deliberately downgraded to
