@@ -10,11 +10,14 @@ from pathlib import Path
 from kernel.lineage_store import open_run
 from kernel.protocol import ParsedCandidate, RecordRef, read_candidate
 from kernel.protocol_v1 import read_request_v1, request_v1_content_digest
+from kernel.protocol import ContractKind
 from kernel.publish import (
     Published,
     PublishRejectionCode,
     Rejected,
+    UnknownRunError,
     publish,
+    read_committed_contract,
 )
 
 OTHER_DIGEST = "sha256:agent-platform-json-v1:" + "f" * 64
@@ -478,6 +481,39 @@ class PublishTests(unittest.TestCase):
                 child.record_ref,
                 "key-2",
             )
+
+
+class ReadCommittedContractRunIdValidationTests(unittest.TestCase):
+    """PR #47 review round 2 MEDIUM 1: read_committed_contract must not
+    create a stray run directory (or escape runs/ entirely) for a
+    malformed/unknown run_id — it validates before calling open_run."""
+
+    def setUp(self) -> None:
+        self._state_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._state_directory.cleanup)
+        self.state = self._state_directory.name
+
+    def test_malformed_run_id_raises_without_creating_a_directory(self) -> None:
+        with self.assertRaises(UnknownRunError):
+            read_committed_contract(self.state, "not-32-hex-chars", ContractKind.WORKFLOW_REVISION)
+        self.assertFalse((Path(self.state) / "runs" / "not-32-hex-chars").exists())
+
+    def test_path_traversal_run_id_raises_without_escaping_runs_dir(self) -> None:
+        with self.assertRaises(UnknownRunError):
+            read_committed_contract(
+                self.state, "../elsewhere", ContractKind.WORKFLOW_REVISION
+            )
+        self.assertFalse((Path(self.state) / "elsewhere").exists())
+
+    def test_well_formed_but_unknown_run_id_raises_without_creating_a_directory(
+        self,
+    ) -> None:
+        unknown_run_id = "0" * 32
+        with self.assertRaises(UnknownRunError):
+            read_committed_contract(
+                self.state, unknown_run_id, ContractKind.WORKFLOW_REVISION
+            )
+        self.assertFalse((Path(self.state) / "runs" / unknown_run_id).exists())
 
 
 if __name__ == "__main__":

@@ -245,6 +245,39 @@ def _committed_contract(
     return _record_ref_of(envelope), parsed_candidate.value
 
 
+class UnknownRunError(Exception):
+    """``run_id`` is malformed or has no run directory under ``state``."""
+
+
+def read_committed_contract(
+    state: str, run_id: str, contract_kind: ContractKind
+) -> tuple[RecordRef, Any]:
+    """Re-read a run's one committed record of a kind, typed.
+
+    Public re-read path for callers (e.g. M4's Context Compiler binding
+    check) that must verify a caller-held value still matches the
+    authoritative published record, not a second writer — this only reads.
+
+    Validates ``run_id`` the same way ``publish()`` does (well-formed
+    32-hex-char id, an existing ``runs/{run_id}`` directory) BEFORE calling
+    ``open_run`` — unlike ``publish()``, ``open_run`` itself creates the run
+    directory as a side effect (``os.makedirs(..., exist_ok=True)``), and a
+    malformed/mistyped ``run_id`` reaching it unvalidated would silently
+    create a stray directory under ``state`` from this read-only path (PR
+    #47 review round 2 MEDIUM 1) — worse, an unvalidated ``run_id`` like
+    ``"../elsewhere"`` would let ``Path.joinpath`` escape ``runs/`` entirely.
+    """
+
+    if not isinstance(run_id, str) or _RUN_ID_PATTERN.fullmatch(run_id) is None:
+        raise UnknownRunError(f"run_id_malformed={run_id!r}")
+    run_dir = Path(state) / "runs" / run_id
+    if not run_dir.is_dir():
+        raise UnknownRunError(f"run_id_not_found={run_id!r}")
+
+    run = open_run(state, run_id)
+    return _committed_contract(run, contract_kind)
+
+
 def _find_idempotent_publish(
     run: RunHandle, idempotency_key: str, digest: str
 ) -> RecordRef | Rejected | None:

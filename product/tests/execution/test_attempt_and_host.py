@@ -4,16 +4,24 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
-from kernel.protocol import ContractKind, RecordRef
+from kernel.protocol import ContractKind, ParsedCandidate, RecordRef, read_candidate
 from kernel.protocol_v1 import (
+    PROTOCOL_VERSION,
+    SCHEMA_VERSION,
     ReceiptV1,
+    RequestV1,
+    TaskV1,
+    WorkflowRevisionV1,
     attempt_packet_v1_content_digest,
     read_attempt_packet_v1,
     read_receipt_v1,
     receipt_v1_content_digest,
 )
-from execution.attempt import _fixture_digest, build_attempt_packet, build_receipt
+from kernel.publish import Published, Rejected, publish
+from execution import context_compiler
+from execution.attempt import build_attempt_packet, build_receipt
 from execution.opencode_adapter import probe_opencode_profile
 from execution.workspace_snapshot import snapshot_identity
 
@@ -21,23 +29,91 @@ FIXTURE_BINARY = (
     Path(__file__).resolve().parent / "fixtures" / "fake_opencode" / "fake_opencode.py"
 )
 
-WORKFLOW_REVISION_REF = RecordRef(
-    contract_kind=ContractKind.WORKFLOW_REVISION.value,
-    record_id="wr_1",
-    content_digest="sha256:agent-platform-json-v1:" + "a" * 64,
-)
+
+def _task(task_id: str) -> TaskV1:
+    return TaskV1(
+        task_id=task_id,
+        objective="Drive the attempt packet through the host",
+        acceptance_criteria=("The Attempt Packet binds to the committed Workflow Revision",),
+    )
+
+
+def _as_candidate(contract_kind: str, typed: Any) -> ParsedCandidate:
+    read = read_candidate(
+        {
+            "contract_kind": contract_kind,
+            "protocol_version": PROTOCOL_VERSION,
+            "schema_version": SCHEMA_VERSION,
+            "payload": typed.to_canonical_value(),
+        }
+    )
+    assert read.ok, read.reason
+    return read.value
+
+
+def _require_published(result: Published | Rejected) -> Published:
+    if isinstance(result, Rejected):
+        raise RuntimeError(f"unexpected publish rejection: {result.code}")
+    return result
+
 
 class BuildAttemptPacketTest(unittest.TestCase):
     def setUp(self) -> None:
-        self._temporary_directory = tempfile.TemporaryDirectory()
-        self.root = Path(self._temporary_directory.name) / "repo"
+        self._state_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._state_directory.cleanup)
+        self.state = self._state_directory.name
+
+        self._workspace_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._workspace_directory.cleanup)
+        self.root = Path(self._workspace_directory.name) / "repo"
         self._init_repo(self.root)
         (self.root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
         self._git(self.root, "add", "tracked.txt")
         self._git(self.root, "commit", "-m", "initial attempt fixture")
 
-    def tearDown(self) -> None:
-        self._temporary_directory.cleanup()
+        self.runs: dict[str, tuple[str, RecordRef, TaskV1]] = {}
+        self._publish_run("task-1")
+
+    def _publish_run(self, task_id: str) -> None:
+        task = _task(task_id)
+        request_published = _require_published(
+            publish(
+                self.state,
+                None,
+                _as_candidate(
+                    "request",
+                    RequestV1(
+                        objective="Prove attempt/host packet identities",
+                        scope=("product/tests/execution/test_attempt_and_host.py",),
+                        acceptance_criteria=(
+                            "The packet identities derive from real committed records",
+                        ),
+                    ),
+                ),
+                None,
+                f"attempt-host-request-{task_id}",
+            )
+        )
+        workflow_published = _require_published(
+            publish(
+                self.state,
+                request_published.run_id,
+                _as_candidate(
+                    "workflow_revision",
+                    WorkflowRevisionV1(
+                        request=request_published.record_ref,
+                        task=task,
+                    ),
+                ),
+                request_published.record_ref,
+                f"attempt-host-workflow-{task_id}",
+            )
+        )
+        self.runs[task_id] = (
+            request_published.run_id,
+            workflow_published.record_ref,
+            task,
+        )
 
     @staticmethod
     def _git(cwd: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -56,37 +132,55 @@ class BuildAttemptPacketTest(unittest.TestCase):
         self._git(path, "config", "user.name", "Attempt Packet Tests")
 
     def _build_packet(self, task_id: str = "task-1"):
+        run_id, workflow_revision_ref, task = self.runs[task_id]
         return build_attempt_packet(
-            WORKFLOW_REVISION_REF,
-            task_id,
-            "impl-1",
-            self.root,
-            str(FIXTURE_BINARY),
+            workflow_revision_ref=workflow_revision_ref,
+            task_id=task_id,
+            implementer_identity="impl-1",
+            state=self.state,
+            run_id=run_id,
+            task=task,
+            workspace_root=self.root,
+            opencode_binary_path=str(FIXTURE_BINARY),
         )
 
     def test_binds_published_workflow_revision_ref(self) -> None:
         packet = self._build_packet()
-        self.assertEqual(packet.workflow_revision, WORKFLOW_REVISION_REF)
+        self.assertEqual(packet.workflow_revision, self.runs["task-1"][1])
         self.assertEqual(packet.task_id, "task-1")
         self.assertEqual(packet.implementer_identity, "impl-1")
 
     def test_identity_fields_are_real_and_deterministic(self) -> None:
         first = self._build_packet()
         second = self._build_packet()
-        self.assertEqual(first.context_digest, _fixture_digest("context", "task-1"))
+        task = self.runs["task-1"][2]
+        runtime_identity = probe_opencode_profile(str(FIXTURE_BINARY)).identity
+        expected_pack = context_compiler.compile_context_pack(
+            task_id="task-1",
+            task_objective=task.objective,
+            task_acceptance_criteria=task.acceptance_criteria,
+            workspace_snapshot_digest=snapshot_identity(self.root).digest,
+            runtime_capability_profile_identity=runtime_identity,
+            contract_refs=(),
+            disclosure_identity=context_compiler.disclosure_identity(
+                runtime_identity, "v1"
+            ),
+        )
+        self.assertEqual(first.context_digest, expected_pack.digest)
         self.assertEqual(first.context_digest, second.context_digest)
         self.assertEqual(
             first.workspace_snapshot_digest, snapshot_identity(self.root).digest
         )
         self.assertEqual(
             first.runtime_capability_profile_identity,
-            probe_opencode_profile(str(FIXTURE_BINARY)).identity,
+            runtime_identity,
         )
         self.assertEqual(first.workspace_snapshot_digest, second.workspace_snapshot_digest)
         self.assertEqual(
             first.runtime_capability_profile_identity,
             second.runtime_capability_profile_identity,
         )
+        self._publish_run("task-2")
         other_task = self._build_packet("task-2")
         self.assertNotEqual(first.context_digest, other_task.context_digest)
 

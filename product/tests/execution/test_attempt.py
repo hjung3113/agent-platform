@@ -4,32 +4,101 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
-from kernel.protocol import ContractKind, RecordRef
+from kernel.protocol import ParsedCandidate, read_candidate
+from kernel.protocol_v1 import (
+    PROTOCOL_VERSION,
+    SCHEMA_VERSION,
+    RequestV1,
+    TaskV1,
+    WorkflowRevisionV1,
+)
+from kernel.protocol import RecordRef
+from kernel.publish import Published, Rejected, publish
+from execution import attempt as attempt_module
+from execution import context_compiler
 from execution.attempt import build_attempt_packet
+
 
 FIXTURE_BINARY = (
     Path(__file__).resolve().parent / "fixtures" / "fake_opencode" / "fake_opencode.py"
 )
 
-WORKFLOW_REVISION_REF = RecordRef(
-    contract_kind=ContractKind.WORKFLOW_REVISION.value,
-    record_id="wr_attempt_test",
-    content_digest="sha256:agent-platform-json-v1:" + "a" * 64,
+TASK_ID = "task-attempt-real-identities"
+TASK = TaskV1(
+    task_id=TASK_ID,
+    objective="Prove real attempt-packet identities bind to published records",
+    acceptance_criteria=("The Attempt Packet binds to the published Workflow Revision",),
 )
+
+
+def _as_candidate(contract_kind: str, typed: Any) -> ParsedCandidate:
+    read = read_candidate(
+        {
+            "contract_kind": contract_kind,
+            "protocol_version": PROTOCOL_VERSION,
+            "schema_version": SCHEMA_VERSION,
+            "payload": typed.to_canonical_value(),
+        }
+    )
+    assert read.ok, read.reason
+    return read.value
+
+
+def _require_published(result: Published | Rejected) -> Published:
+    if isinstance(result, Rejected):
+        raise RuntimeError(f"unexpected publish rejection: {result.code}")
+    return result
 
 
 class AttemptPacketRealIdentityTest(unittest.TestCase):
     def setUp(self) -> None:
-        self._temporary_directory = tempfile.TemporaryDirectory()
-        self.root = Path(self._temporary_directory.name) / "repo"
+        self._state_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._state_directory.cleanup)
+        self.state = self._state_directory.name
+
+        self._workspace_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._workspace_directory.cleanup)
+        self.root = Path(self._workspace_directory.name) / "repo"
         self._init_repo(self.root)
         (self.root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
         self._git(self.root, "add", "tracked.txt")
         self._git(self.root, "commit", "-m", "initial attempt identity fixture")
 
-    def tearDown(self) -> None:
-        self._temporary_directory.cleanup()
+        request_published = _require_published(
+            publish(
+                self.state,
+                None,
+                _as_candidate(
+                    "request",
+                    RequestV1(
+                        objective="Prove attempt-packet real identity binding",
+                        scope=("product/tests/execution/test_attempt.py",),
+                        acceptance_criteria=(
+                            "The packet identities derive from real workspace/runtime",
+                        ),
+                    ),
+                ),
+                None,
+                "attempt-test-request",
+            )
+        )
+        workflow_value = WorkflowRevisionV1(
+            request=request_published.record_ref,
+            task=TASK,
+        )
+        workflow_published = _require_published(
+            publish(
+                self.state,
+                request_published.run_id,
+                _as_candidate("workflow_revision", workflow_value),
+                request_published.record_ref,
+                "attempt-test-workflow",
+            )
+        )
+        self.run_id = request_published.run_id
+        self.workflow_revision_ref = workflow_published.record_ref
 
     @staticmethod
     def _git(cwd: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -49,15 +118,18 @@ class AttemptPacketRealIdentityTest(unittest.TestCase):
 
     def _build_packet(self, opencode_binary_path: Path = FIXTURE_BINARY):
         return build_attempt_packet(
-            workflow_revision_ref=WORKFLOW_REVISION_REF,
-            task_id="task-attempt-real-identities",
+            workflow_revision_ref=self.workflow_revision_ref,
+            task_id=TASK_ID,
             implementer_identity="impl-1",
+            state=self.state,
+            run_id=self.run_id,
+            task=TASK,
             workspace_root=self.root,
             opencode_binary_path=str(opencode_binary_path),
         )
 
     def _drift_binary(self) -> Path:
-        other = Path(self._temporary_directory.name) / "fake_opencode_drift.py"
+        other = Path(self._workspace_directory.name) / "fake_opencode_drift.py"
         other.write_text(
             "#!/usr/bin/env python3\n"
             "import sys\n"
@@ -85,6 +157,56 @@ class AttemptPacketRealIdentityTest(unittest.TestCase):
             changed_workspace.runtime_capability_profile_identity,
             changed_runtime.runtime_capability_profile_identity,
         )
+
+    def test_task_id_argument_disagrees_with_task_rejects(self) -> None:
+        with self.assertRaises(attempt_module.TaskBindingMismatchError):
+            build_attempt_packet(
+                workflow_revision_ref=self.workflow_revision_ref,
+                task_id="a-different-task-id",
+                implementer_identity="impl-1",
+                state=self.state,
+                run_id=self.run_id,
+                task=TASK,
+                workspace_root=self.root,
+                opencode_binary_path=str(FIXTURE_BINARY),
+            )
+
+    def test_non_empty_contract_refs_rejected_fail_closed(self) -> None:
+        ref = RecordRef(
+            contract_kind="decision",
+            record_id="r1",
+            content_digest="sha256:agent-platform-json-v1:" + "a" * 64,
+        )
+        with self.assertRaises(context_compiler.UnverifiedContractRefError):
+            build_attempt_packet(
+                workflow_revision_ref=self.workflow_revision_ref,
+                task_id=TASK_ID,
+                implementer_identity="impl-1",
+                state=self.state,
+                run_id=self.run_id,
+                task=TASK,
+                workspace_root=self.root,
+                opencode_binary_path=str(FIXTURE_BINARY),
+                contract_refs=(ref,),
+            )
+
+    def test_binding_mismatch_rejects(self) -> None:
+        mutated_task = TaskV1(
+            task_id=TASK_ID,
+            objective="mutated objective not published in the Workflow Revision",
+            acceptance_criteria=TASK.acceptance_criteria,
+        )
+        with self.assertRaises(attempt_module.TaskBindingMismatchError):
+            build_attempt_packet(
+                workflow_revision_ref=self.workflow_revision_ref,
+                task_id=TASK_ID,
+                implementer_identity="impl-1",
+                state=self.state,
+                run_id=self.run_id,
+                task=mutated_task,
+                workspace_root=self.root,
+                opencode_binary_path=str(FIXTURE_BINARY),
+            )
 
 
 if __name__ == "__main__":

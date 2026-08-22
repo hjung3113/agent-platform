@@ -1,6 +1,65 @@
 # Handoff
 
-## Completed in this slice (M3 implementation)
+## Completed in this slice (M4 implementation)
+
+- M4 — deterministic Context Compiler implemented per
+  [`docs/plans/active/m4-deterministic-context-compiler.md`](docs/plans/active/m4-deterministic-context-compiler.md),
+  PR [#47](https://github.com/hjung3113/agent-platform/pull/47). Dispatched as a
+  dependency-ordered task DAG (`gpt-5.6-luna` max, `glm-5.3` high/low via opencode),
+  orchestrator (main session) verified/integrated between steps and caught one real
+  cross-task bug (compile-time placeholder reserved-cost vs execute-time real value would
+  have made every `execute()` call raise `StaleContextPackError`; fixed by hoisting the
+  shared constant/helper into `context_compiler.py`).
+- First review round (`chatgpt-codex-connector` automated PR review + repo owner
+  adversarial review on PR #47) found and fixed 4 real P1s and 3 P2s, all verified against
+  the actual committed code before fixing:
+  - `contract_refs` were accepted from any caller with zero authority verification (no
+    Decision/Contract record type/read path exists) — real callers
+    (`build_attempt_packet`, `host.execute`) now fail-closed reject any non-empty
+    `contract_refs` (`UnverifiedContractRefError`); `compile_context_pack` itself stays
+    pure/unit-tested so the dedup/ordering machinery isn't lost, the gate lives at the
+    trust boundary instead.
+  - Contract-ref dedup/conflict detection grouped by `record_id` alone, wrongly collapsing
+    two refs sharing a `record_id`+`content_digest` but differing `contract_kind`. Now
+    groups by `(contract_kind, record_id)`.
+  - Budget accounting's `reserved_cost` was a flat 64-byte guess, undercounting the real
+    labeled-section renderer's overhead (which grows with unit count) — a large-but-
+    accepted pack could still exceed the actual single-argv message size and hit `E2BIG` at
+    spawn instead of the typed compile-time budget error. `reserved_cost` is now computed
+    inside `compile_context_pack` from the real rendered message (`render_context_pack`,
+    moved into `context_compiler.py` as the single source of truth for both the actual
+    spawn rendering and the budget predicate) plus a small fixed argv-elements allowance;
+    `CONTEXT_BUDGET_MAX` lowered from exactly 128 KiB to ~117 KiB so the "comfortably
+    under" comment is true again.
+  - Evidence-file writing (documented as non-authoritative record-keeping) was an
+    unguarded synchronous call ahead of `host.execute()` in `run_one_task.py` — a storage
+    failure there would abort an already-admitted run. Now wrapped in `try/except OSError`
+    so it can never block execution, matching the documented semantics.
+  - (P2) Evidence writes used a fixed per-attempt temp filename, so two concurrent
+    idempotent-retry writers for the same Attempt could race and one's `os.replace` could
+    lose its source file; now uses `tempfile.mkstemp` for a unique temp name per call.
+  - (P2) `build_attempt_packet` didn't fail-closed-check `task_id` against `task.task_id`/
+    the committed revision's `task_id` directly (relied on `publish()`'s downstream
+    `ATTEMPT_TASK_BINDING_MISMATCH` check, not a bypass but a docstring-contract gap); now
+    checked explicitly.
+  - (P2) This file's M4 section still described M4 as future work while the PR already
+    contained the implementation — updated (this entry).
+  - Optional/omission machinery (`OmissionRecord`, optional-cost accounting) remains real
+    but structurally unreachable — no code path ever constructs an optional `ContextUnit` —
+    flagged as dead scaffold by the owner review; **not removed this round** (explicit
+    settled design decision from M4 design-grilling round 2, same forward-compatible-shape
+    precedent as `M3_REQUIRED_CAPABILITIES = ()`), but worth revisiting if a second review
+    round still calls it out.
+- 306 tests total, all green (`test_context_compiler.py` grew to 13, plus new
+  contract-kind-dedup, budget-matches-real-render, and contract-refs-rejection coverage in
+  `test_attempt.py`/`test_host.py`/`test_m4_integration.py`).
+- **Not yet done**: plan §14's second-round post-implementation adversarial review
+  (`glm-5.3` high) — M3's second round caught 14 more real defects a single
+  pre-implementation review missed; the PR #47 review thread above was a *first* real-code
+  review (by codex-connector + the repo owner, not yet a dedicated `glm-5.3` high pass), so
+  budget for one more round before treating M4 as closed the way M3's plan §14 was.
+
+## Completed in prior slice (M3 implementation)
 
 - M3 — Real Host/security boundary and first runtime adapter (OpenCode) implemented and
   merged per [`docs/plans/active/m3-real-host-security-boundary.md`](docs/plans/active/m3-real-host-security-boundary.md),
@@ -100,12 +159,62 @@ coverage was lost by retiring the stub-era duplicate (see PR7b in the plan's §1
 
 ## Next session — fixed scope
 
-**Plan M4** per [`mvp-implementation-roadmap.md`](docs/plans/active/mvp-implementation-roadmap.md)
-line 237 ("M4 — Deterministic Context Compiler"), then implement it. No M4 plan doc exists
-yet — start there, following the same process M1/M2/M3 used: design doc, adversarial review
-(consider a **second** review round after implementation too, not only before — this
-session's second round caught 14 real defects a single pre-implementation review missed),
-then dispatch implementation.
+**M4 plan doc written and adversarially hardened this session**:
+[`m4-deterministic-context-compiler.md`](docs/plans/active/m4-deterministic-context-compiler.md).
+Reviewed by `glm-5.3` (effort high, via opencode) against roadmap §3's five lenses plus
+targeted attacks on the freshness/staleness design, the content/authority boundary, and the
+budget math — found no BLOCKER but 5 HIGH, 4 MEDIUM, 5 LOW real defects (plan §13), all
+fixed inline in §§3–11 (not deferred): the third freshness recheck was reframed from a
+near-tautological same-input recompute into real compile/execute parameter-consistency
+binding plus authoritative task re-derivation (§6); `build_attempt_packet`/`execute` gained
+real `task`/`contract_refs` parameters and a compile-time+execute-time binding check
+against the published Workflow Revision's task digest, closing a caller-trust-only gap
+(§10.2); contract-ref dedup now keys on the full `RecordRef` triple and fail-closed rejects
+same-id-different-digest conflicts instead of silently picking one (§4); the reserved-cost
+disclosure identity is now digest-covered so renderer-template drift actually changes
+`context_digest` (§3, §5.2); the budget-exceeded predicate now covers required+reserved,
+not required alone (§5.3); §8's storage section was rewritten from scratch — M3 never
+actually had an evidence-store pattern to mirror, so a concrete location
+(`{state_dir}/context-evidence/`, sibling to the Kernel lineage store's `runs/` tree, never
+inside a managed workspace) and atomic-write mechanism are now specified. Next session:
+implement per §10's order, then run a **second** adversarial review round after
+implementation too, not only before — M3's second round caught 14 more real defects a
+single pre-implementation review missed; expect the same here.
+
+This session's design grilling (before any M4 code) settled the following scope decisions —
+follow them rather than re-deriving:
+
+- source-class taxonomy (control/lineage/observed/derived) implemented structurally now even
+  though the lineage class stays empty until M7's real orchestration gives it predecessors —
+  forward-compatible shape, no behavior yet
+- candidate set stays limited to what's already real: Task objective/AC, admitted decision/
+  contract refs, `WorkspaceSnapshot` identity, `RuntimeCapabilityProfile` identity — no new
+  repository-file discovery/selection subsystem (YAGNI per AGENTS.md rule 9, mirrors M3's
+  empty `M3_REQUIRED_CAPABILITIES` precedent); shuffle-order/determinism exit evidence is
+  proven over this finite set (reuse `runtime_capability.py`'s `_utf16_sort_key` pattern), not
+  over filesystem/API enumeration that doesn't exist in scope
+- Context Pack follows M3's pattern: a computed value, identity embedded into (repurposed)
+  `AttemptPacketV1.context_digest`, full structured pack kept as evidence alongside — no new
+  Kernel-published record type
+- token/cost estimator is a deterministic placeholder (byte-length based), versioned
+  (`estimator_name@revision`) like everything else here — a real tokenizer is a runtime/model
+  decision outside M4's boundary; only the identity binding needs to be real now
+- `host.execute()`'s OpenCode `run`-message rendering gets wired to the real Context Pack (not
+  left as an unused struct) — labeled sections per source class so the authority/data boundary
+  survives rendering, per issue #6's "renderer must preserve a hard boundary" finding
+- `CONTEXT_BUDGET_EXCEEDED` is a new exception type mirroring `CapabilityAdmissionError`
+  (`kernel/runtime_capability.py`), raised during compile before packet construction — blocks
+  packet creation entirely, no runnable partial packet
+- runtime disclosure-profile identity/reserved-cost is a separate lightweight identity computed
+  in the M4 module, not a new `RuntimeCapabilityProfile` field (avoids M3 schema churn), but
+  re-verified at `execute()` time the same way M3 re-verifies profile identity on drift
+- evaluated and declined migrating `opencode-orchestrated-agent-workflow`'s runtime/
+  adapter/transport code directly: different language (Node.js vs this repo's Python kernel),
+  different protocol shape (its own Task Packet/bootstrap envelope vs this repo's
+  `AttemptPacketV1`/`RecordRef`), and its own research note already flags a core state-model
+  conflict (mutable `run.json` vs this repo's event-authority Kernel-publish model). Interface-
+  level reference only, same as the existing `docs/research/` adoption process — no code/
+  runtime dependency on that sibling repo.
 
 M4 replaces M2's opaque `AttemptPacketV1.context_digest` fixture field with a real,
 structured Context Pack, compiled deterministically over exactly the admitted task/lineage/
@@ -126,8 +235,8 @@ source identities:
 
 Start in-process. Do not create a Context service.
 
-**Non-goals for M4:** all runtimes beyond OpenCode (M8), release automation, hardened
-criterion/evidence policy (M5), orchestration expansion (M6). Reuse M3's real
+**Non-goals for M4:** all runtimes beyond OpenCode (M9), release automation, hardened
+criterion/evidence policy (M6), orchestration expansion (M7). Reuse M3's real
 `RuntimeCapabilityProfile`/`workspace_snapshot` primitives rather than inventing parallel
 freshness/identity machinery.
 
@@ -140,10 +249,96 @@ rather than silently expanding context.
 
 Primary issue: #6, with security overlap in #8.
 
+**New milestone inserted after M4, before verification hardening**: this session added
+[`M5 — Cross-project failure-mode ledger`](docs/plans/active/mvp-implementation-roadmap.md)
+(tracking [Issue #46](https://github.com/hjung3113/agent-platform/issues/46)), so the old
+M5-M9 became M6-M10 — a genuine renumber, not a new milestone silently taking an old number.
+It mines sibling repos' own git history/issues/PRs (git-log/issue/PR failure-mode pass first,
+then PR body/diff on flagged items only) for concrete failure/regression/bug records — not
+design-pattern adoption, which `docs/research/adoption-ledger.md` already covers — producing
+a new `docs/research/failure-mode-ledger.md` that feeds M6's adversarial review before M6
+design starts. Full mining scope: `opencode-orchestrated-agent-workflow`,
+`agent-migration-pipeline`, `general-low-reasoning-agent-harness`, `thin-agent-harness`.
+`meta-prompting-skill` gets an applicability-only scan (conceptual repo, not a failure-mining
+target), not failure mining. Do M4 first, M5 gates M6.
+
+**Renumbering caveat**: only `mvp-implementation-roadmap.md` and this file were renumbered.
+The already-merged `docs/plans/active/m0`–`m3` plan docs still say "M5"/"M6"/etc. in their own
+historical rationale prose (dozens of occurrences, mostly embedded in analysis sentences, not
+headers) — deliberately left untouched as historical record rather than risking a wide,
+error-prone edit across merged docs. When reading those older plan docs, their M5–M9 mentions
+refer to the **old** numbering, one lower than the current roadmap for M6 onward.
+
 `AttemptPacketV1.context_digest` (currently `execution/attempt.py`'s M2-era
 `_fixture_digest("context", task_id)`, deliberately left untouched through M3) is M4's
 replacement target — decide how much of the fixture's shape (a single opaque digest field on
 the packet) survives versus needs a real structured Context Pack reference.
+
+## M4 design grilling round 2 — settled, plan doc not yet written
+
+Continuation of the scope decisions above. Next session: write
+`docs/plans/active/m4-deterministic-context-compiler.md`, adversarial-review it
+(`glm-5.3`, effort high, via opencode) before implementation starts, harden, then dispatch
+implementation — identical process to M1/M2/M3, including a second post-implementation
+review round. Follow these settled decisions rather than re-deriving:
+
+- **Freshness**: M3's `host.execute()` already rechecks `workspace_snapshot_digest`/
+  `runtime_capability_profile_identity` pre-spawn (`host.py:224-238`). M4 adds a **third**
+  recheck on the compiler itself — `StaleContextPackError`, recompute+compare
+  `context_digest` pre-spawn — rather than relying on transitive freshness through the other
+  two. Catches compiler nondeterminism bugs directly.
+- **Required/optional**: every real M4 candidate (Task objective/AC, admitted decision/
+  contract refs, WorkspaceSnapshot identity, RuntimeCapabilityProfile identity) is
+  `required` — no real truncation happens in M4. The optional/omission/truncation machinery
+  is still built now (forward-compatible shape, same YAGNI precedent as
+  `M3_REQUIRED_CAPABILITIES = ()`), exercised only by synthetic test fixtures, not real data.
+- **Dedup/ordering scope**: the only order-ambiguous plural item is the admitted decision/
+  contract-refs list (0+ refs). Task/WorkspaceSnapshot/RuntimeCapabilityProfile are each a
+  single fixed slot — no ordering logic needed for them. Dedup/sort reuses
+  `runtime_capability.py`'s `_utf16_sort_key` pattern, scoped only to contract-ref
+  identifiers — no general multi-source merge utility.
+- **Adversarial fixture, built now not deferred**: even though observed/lineage source
+  classes stay empty until M7, build a fixture today with fake-directive text inside Task
+  `objective`/`acceptance_criteria` (control-class, already-trusted) — assert the compiled
+  pack treats it as inert string content that never reaches any policy/admission/verdict
+  path. Cheapest present-day proof of the content/authority boundary.
+- **ContextUnit concrete shape** (confirmed):
+  ```
+  @dataclass(frozen=True)
+  class ContextUnit:
+      source_class: str        # "control" | "lineage" | "observed" | "derived"
+      source_identity: str      # e.g. "task:<task_id>", "workspace_snapshot",
+                                  # "runtime_capability_profile", "contract_ref:<record_id>"
+      scope: str                 # e.g. "task.objective", "task.acceptance_criteria"
+      inclusion_reason: str
+      requirement: str           # "required" | "optional"
+      content: str | bytes       # actual disclosed content, not just a digest
+      content_digest: str
+      estimated_cost: int        # abstract estimator-cost units (currently byte-length based)
+  ```
+  `content` is real, not digest-only-with-lazy-resolution — the compiler needs actual text to
+  render into the OpenCode `run` message, not just an identity anchor.
+- **Budget unit**: abstract cost units from `estimator_name@revision`, not raw bytes directly
+  — byte-length is just the current estimator's implementation; a future estimator swap
+  changes the number without changing the budget contract's shape.
+- **Budget limit source**: a single fixed constant in the M4 module (e.g.
+  `CONTEXT_BUDGET_MAX`), same shape as M3's one global policy table — not a per-task/
+  per-compilation threaded input. Revisit only if M7 orchestration makes per-task budgets
+  load-bearing.
+- **Reserved-cost meaning**: a lightweight identity `{runtime_identity, run-message-template-
+  revision}` plus a reserved byte-cost for OpenCode's own `run`-message envelope overhead
+  only (`host.py`'s `_task_message` wrapping, not Context Pack content) — total budget =
+  required+optional pack cost + this reserved cost. No safety-margin buffer for the
+  runtime's own unknowable system-prompt size; that's genuinely out of this repo's
+  visibility, not estimated.
+- **Disclosure drift handling**: hard reject only — a `StaleContextPackError`-class
+  exception, mirroring M3's fail-closed stale-identity handling
+  (`StaleWorkspaceSnapshotError` etc. are raised, never auto-healed). No silent
+  auto-recompile path inside `execute()`.
+- **Context Pack storage**: a new evidence file per Attempt, mirroring M3's evidence-store
+  pattern (e.g. alongside `RuntimeCapabilityProfile` evidence) — digest embedded into
+  `AttemptPacketV1.context_digest`, full structured pack kept as the evidence file's content,
+  not recomputed on demand and not left unstored.
 
 ## Explicit scope limits carried forward from M3 (not gaps to silently close in M4)
 
@@ -154,7 +349,7 @@ need makes them load-bearing, per AGENTS.md rule 9 (YAGNI):
 - **Per-task capability-requirement differentiation.** M3's admission policy
   (`execution/policy.py`) is one fixed global table; it cannot express "this specific task
   requires network/filesystem/process isolation as a guarantee." Real per-task/per-role
-  requirement binding needs either a contract change or M6's real orchestration layer, where
+  requirement binding needs either a contract change or M7's real orchestration layer, where
   task variability first becomes real — M4's Context Compiler is not obviously the right
   place either, but check when M4 design starts.
 - **OpenCode global-config provenance.** `execution/opencode_adapter.py` probes and digests
@@ -173,11 +368,11 @@ need makes them load-bearing, per AGENTS.md rule 9 (YAGNI):
 - **External-effect denial is declarative admission rejection only**, not a process-boundary
   control — same document/enforcement-honesty class as network. `permission_envelope.
   external_effects` stays empty for every M3 path; real release/external-effect authorization
-  is M9 scope per the roadmap, unchanged.
+  is M10 scope per the roadmap, unchanged.
 
 ## Deferred until the corresponding gate
 
-### M7 / real cross-version edge or platform validation
+### M8 / real cross-version edge or platform validation
 
 - cross-platform (Windows/Linux) crash-consistency validation of the M1 store
 - compatibility registry, historical cross-version rule provenance, retained-lineage replay
@@ -193,14 +388,14 @@ need makes them load-bearing, per AGENTS.md rule 9 (YAGNI):
 ### Later milestones (unchanged from M0/M1/M2 handoff)
 
 - #5 verification/evidence soundness after authoritative lineage/snapshot bindings exist
-  (M5 — hardened criterion/evidence policy, execution-provenance independence,
+  (M6 — hardened criterion/evidence policy, execution-provenance independence,
   self-verification closed by real distinct identity rather than M2's string inequality).
   M3's real Result/Runtime Observation binding makes this possible but does not implement it.
-- #4 deterministic orchestration after replay/authoritative state is stable (M6 — retry/
+- #4 deterministic orchestration after replay/authoritative state is stable (M7 — retry/
   repair/replan, fan-in, safe parallelism, multi-task DAG, Reviewer/Verifier split per
   ADR-0009; also where M3's per-task capability-requirement gap above likely gets closed).
-- #24 skill supply-chain (M9) after core Kernel/runtime boundaries are executable.
+- #24 skill supply-chain (M10) after core Kernel/runtime boundaries are executable.
 - #9/#25 compatibility registry, historical cross-version rule provenance, retained-lineage
-  replay, and reader/rule retirement reachability remain M7/real-cross-version-edge work.
-- additional runtime adapters (M8) built against M3's `RuntimeCapabilityProfile`/
+  replay, and reader/rule retirement reachability remain M8/real-cross-version-edge work.
+- additional runtime adapters (M9) built against M3's `RuntimeCapabilityProfile`/
   containment/redaction primitives — cross-runtime canonical-action conformance matrix.

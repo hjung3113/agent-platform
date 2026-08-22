@@ -7,16 +7,28 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from kernel import admission
-from kernel.protocol import ContractKind, RecordRef
-from kernel.protocol_v1 import AttemptPacketV1, TaskV1, read_result_v1
-from execution import host, policy
+from kernel.protocol import ParsedCandidate, RecordRef, read_candidate
+from kernel.protocol_v1 import (
+    PROTOCOL_VERSION,
+    SCHEMA_VERSION,
+    AttemptPacketV1,
+    RequestV1,
+    TaskV1,
+    WorkflowRevisionV1,
+    read_result_v1,
+)
+from kernel.publish import Published, Rejected, publish
+from execution import context_compiler, host, policy
+from execution.attempt import build_attempt_packet
 from execution.host import (
     AdmissionRejectedError,
     RetentionBlockedError,
     RuntimeSubstitutionRejectedError,
+    StaleContextPackError,
     StaleRuntimeCapabilityProfileError,
     StaleWorkspaceSnapshotError,
     execute,
@@ -31,22 +43,31 @@ FAKE_VERSION = "1.2.3"
 REPORT_NAME = "fake-opencode-report.json"
 DIRECTIVE_NAME = "fake-opencode-directive.txt"
 SENTINEL_VARIABLE = "SENTINEL_SECRET"
-WORKFLOW_REVISION_REF = RecordRef(
-    contract_kind=ContractKind.WORKFLOW_REVISION.value,
-    record_id="wr_host_1",
-    content_digest="sha256:agent-platform-json-v1:" + "a" * 64,
+REQUEST = RequestV1(
+    objective="Exercise host.execute() against real published run records",
+    scope=("product/tests/execution/test_host.py",),
+    acceptance_criteria=("The Host Result binds to the published Attempt Packet",),
 )
-ATTEMPT_REF = RecordRef(
-    contract_kind=ContractKind.ATTEMPT_PACKET.value,
-    record_id="ap_host_1",
-    content_digest="sha256:agent-platform-json-v1:" + "b" * 64,
-)
-CONTEXT_DIGEST_FIXTURE = "sha256:agent-platform-json-v1:" + "e" * 64
 TASK = TaskV1(
     task_id="task-host-1",
     objective="Prove the Host actually receives the admitted task",
     acceptance_criteria=("The runtime message contains the task objective",),
 )
+
+
+def as_candidate(contract_kind: str, typed: Any) -> ParsedCandidate:
+    """Validate a typed contract value through the real reader dispatch."""
+
+    read = read_candidate(
+        {
+            "contract_kind": contract_kind,
+            "protocol_version": PROTOCOL_VERSION,
+            "schema_version": SCHEMA_VERSION,
+            "payload": typed.to_canonical_value(),
+        }
+    )
+    assert read.ok, read.reason
+    return read.value
 
 
 class HostExecuteTest(unittest.TestCase):
@@ -58,6 +79,37 @@ class HostExecuteTest(unittest.TestCase):
         (self.root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
         self._git(self.root, "add", "tracked.txt")
         self._git(self.root, "commit", "-m", "initial host fixture")
+        # Kernel state lives beside — never inside — the snapshotted
+        # workspace. Every test publishes its own Request -> Workflow
+        # Revision chain so host.execute()'s third pre-spawn check re-reads
+        # a real committed record for this run (plan §9 MEDIUM 4).
+        self.state = str(Path(self._temporary_directory.name) / "kernel-state")
+        request_published = self._require_published(
+            publish(
+                self.state,
+                None,
+                as_candidate("request", REQUEST),
+                None,
+                "host-tests-request",
+            )
+        )
+        self.run_id = request_published.run_id
+        workflow_published = self._require_published(
+            publish(
+                self.state,
+                self.run_id,
+                as_candidate(
+                    "workflow_revision",
+                    WorkflowRevisionV1(
+                        request=request_published.record_ref,
+                        task=TASK,
+                    ),
+                ),
+                request_published.record_ref,
+                "host-tests-workflow",
+            )
+        )
+        self.workflow_revision_ref = workflow_published.record_ref
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -81,32 +133,73 @@ class HostExecuteTest(unittest.TestCase):
         self._git(path, "config", "user.email", "host-tests@example.invalid")
         self._git(path, "config", "user.name", "Host Execute Tests")
 
-    def _build_attempt(
+    def _require_published(self, result: Published | Rejected) -> Published:
+        """Fail loudly if a golden-path fixture publication was rejected."""
+
+        if isinstance(result, Rejected):
+            raise AssertionError(
+                f"fixture publish rejected: {result.code}: {result.reason}"
+            )
+        return result
+
+    def _real_attempt(
         self,
         *,
         declared_generated_paths: tuple[str, ...] = (),
-        profile_identity: str | None = None,
-        snapshot_digest: str | None = None,
-    ) -> AttemptPacketV1:
-        return AttemptPacketV1(
-            workflow_revision=WORKFLOW_REVISION_REF,
-            task_id="task-host-1",
-            implementer_identity="implementer-fixture",
-            context_digest=CONTEXT_DIGEST_FIXTURE,
-            workspace_snapshot_digest=(
-                snapshot_digest
-                if snapshot_digest is not None
-                else snapshot_identity(self.root, declared_generated_paths).digest
+        opencode_binary_path: str | None = None,
+    ) -> tuple[RecordRef, AttemptPacketV1]:
+        """Build and publish a real, internally-consistent Attempt Packet.
+
+        The packet comes from the real ``build_attempt_packet`` against this
+        test's committed Workflow Revision, workspace, and binary, then goes
+        through ``publish()`` so the returned record ref is a real Kernel
+        identity. With the same ``state``/``run_id``/``TASK`` handed to
+        ``execute()`` (and the default ``run_message_template_revision``),
+        the packet passes the third pre-spawn context check by construction —
+        that compile-time/execute-time consistency is load-bearing and
+        mirrors run_one_task's wiring (plan §9 MEDIUM 4).
+
+        ``opencode_binary_path`` lets a test bind the packet to a drift
+        binary's profile identity (replacing the old hand-built fixture's
+        ``profile_identity`` override) without changing what that test
+        otherwise exercises.
+        """
+
+        attempt_value = build_attempt_packet(
+            workflow_revision_ref=self.workflow_revision_ref,
+            task_id=TASK.task_id,
+            implementer_identity="implementer-host-tests",
+            state=self.state,
+            run_id=self.run_id,
+            task=TASK,
+            workspace_root=self.root,
+            opencode_binary_path=(
+                opencode_binary_path
+                if opencode_binary_path is not None
+                else str(FIXTURE_BINARY)
             ),
-            runtime_capability_profile_identity=(
-                profile_identity
-                if profile_identity is not None
-                else probe_opencode_profile(str(FIXTURE_BINARY)).identity
-            ),
+            declared_generated_paths=declared_generated_paths,
         )
+        attempt_published = self._require_published(
+            publish(
+                self.state,
+                self.run_id,
+                as_candidate("attempt_packet", attempt_value),
+                self.workflow_revision_ref,
+                "host-tests-attempt",
+            )
+        )
+        return attempt_published.record_ref, attempt_value
 
     def _spawned_report(self) -> Path:
         return self.root / REPORT_NAME
+
+    def _spawned_message(self) -> str:
+        """The run message the fake runtime actually received on argv."""
+
+        return json.loads(self._spawned_report().read_text(encoding="utf-8"))[
+            "message"
+        ]
 
     def _no_required_capabilities(self) -> mock._patch:
         """Test seam: admit with the requirement set the live profile satisfies.
@@ -144,18 +237,22 @@ class HostExecuteTest(unittest.TestCase):
 
     def test_execute_binds_attempt_ref_and_real_observation(self) -> None:
         declared = ("generated/output.txt",)
-        attempt = self._build_attempt(declared_generated_paths=declared)
+        attempt_ref, attempt = self._real_attempt(
+            declared_generated_paths=declared
+        )
         with self._no_required_capabilities():
             result = execute(
-                ATTEMPT_REF,
+                attempt_ref,
                 attempt,
                 self.root,
                 str(FIXTURE_BINARY),
                 TASK,
+                self.state,
+                self.run_id,
                 declared_generated_paths=declared,
             )
 
-        self.assertEqual(result.attempt, ATTEMPT_REF)
+        self.assertEqual(result.attempt, attempt_ref)
         self.assertTrue(result.observation.runtime_identity.startswith(f"opencode@{FAKE_VERSION}+"))
         self.assertEqual(
             result.output_snapshot_digest,
@@ -180,11 +277,19 @@ class HostExecuteTest(unittest.TestCase):
         execution failure, not merely an unreliable success signal."""
 
         (self.root / DIRECTIVE_NAME).write_text("fail", encoding="utf-8")
-        attempt = self._build_attempt()
+        attempt_ref, attempt = self._real_attempt()
 
         with self._no_required_capabilities():
             with self.assertRaises(host.RuntimeExecutionFailedError) as raised:
-                execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
+                execute(
+                    attempt_ref,
+                    attempt,
+                    self.root,
+                    str(FIXTURE_BINARY),
+                    TASK,
+                    self.state,
+                    self.run_id,
+                )
 
         self.assertEqual(raised.exception.returncode, 3)
         self.assertFalse(self._spawned_report().exists())
@@ -194,15 +299,17 @@ class HostExecuteTest(unittest.TestCase):
         directly but never reachable from execute() itself, so no real
         caller could actually exercise external-effect rejection end to end."""
 
-        attempt = self._build_attempt()
+        attempt_ref, attempt = self._real_attempt()
         with self._no_required_capabilities():
             with self.assertRaises(AdmissionRejectedError) as raised:
                 execute(
-                    ATTEMPT_REF,
+                    attempt_ref,
                     attempt,
                     self.root,
                     str(FIXTURE_BINARY),
                     TASK,
+                    self.state,
+                    self.run_id,
                     requested_effects=("github:push",),
                 )
 
@@ -216,44 +323,69 @@ class HostExecuteTest(unittest.TestCase):
         scan_for_retention(None) -> "unknown", which still blocks retention
         rather than crashing execute() outright."""
 
-        (self.root / DIRECTIVE_NAME).write_text("invalid-utf8-stdout", encoding="utf-8")
-        attempt = self._build_attempt()
+        (self.root / DIRECTIVE_NAME).write_text(
+            "invalid-utf8-stdout", encoding="utf-8"
+        )
+        attempt_ref, attempt = self._real_attempt()
 
         with self._no_required_capabilities():
             with self.assertRaises(RetentionBlockedError) as raised:
                 execute(
-                    ATTEMPT_REF,
+                    attempt_ref,
                     attempt,
                     self.root,
                     str(FIXTURE_BINARY),
                     TASK,
+                    self.state,
+                    self.run_id,
                     retain_evidence=True,
                 )
 
         self.assertIn("stdout scan status=unknown", str(raised.exception))
 
     def test_stale_runtime_capability_profile_rejects_before_spawn(self) -> None:
-        drift_identity = probe_opencode_profile(str(self._drift_binary())).identity
-        attempt = self._build_attempt(profile_identity=drift_identity)
+        attempt_ref, attempt = self._real_attempt(
+            opencode_binary_path=str(self._drift_binary())
+        )
+        self.assertNotEqual(
+            attempt.runtime_capability_profile_identity,
+            probe_opencode_profile(str(FIXTURE_BINARY)).identity,
+        )
 
         with self.assertRaises(StaleRuntimeCapabilityProfileError):
-            execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
+            execute(
+                attempt_ref,
+                attempt,
+                self.root,
+                str(FIXTURE_BINARY),
+                TASK,
+                self.state,
+                self.run_id,
+            )
 
         self.assertFalse(self._spawned_report().exists())
 
     def test_stale_workspace_snapshot_rejects_before_spawn(self) -> None:
-        attempt = self._build_attempt()
+        attempt_ref, attempt = self._real_attempt()
         (self.root / "untracked-late.txt").write_text("late mutation\n", encoding="utf-8")
 
         with self.assertRaises(StaleWorkspaceSnapshotError):
-            execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
+            execute(
+                attempt_ref,
+                attempt,
+                self.root,
+                str(FIXTURE_BINARY),
+                TASK,
+                self.state,
+                self.run_id,
+            )
 
         self.assertFalse(self._spawned_report().exists())
 
     def test_mutation_between_admission_and_spawn_is_caught_by_pre_spawn_recheck(
         self,
     ) -> None:
-        attempt = self._build_attempt()
+        attempt_ref, attempt = self._real_attempt()
         injected = self.root / "injected-between-admission-and-spawn.txt"
         real_probe = host.probe_opencode_profile
         probe_calls = {"count": 0}
@@ -267,7 +399,15 @@ class HostExecuteTest(unittest.TestCase):
         with self._no_required_capabilities():
             with mock.patch.object(host, "probe_opencode_profile", mutating_probe):
                 with self.assertRaises(StaleWorkspaceSnapshotError):
-                    execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
+                    execute(
+                        attempt_ref,
+                        attempt,
+                        self.root,
+                        str(FIXTURE_BINARY),
+                        TASK,
+                        self.state,
+                        self.run_id,
+                    )
 
         self.assertTrue(injected.is_file())
         self.assertFalse(self._spawned_report().exists())
@@ -288,9 +428,17 @@ class HostExecuteTest(unittest.TestCase):
             # profile identity must reflect the same policy the live probe
             # will see during execute(), or this hits StaleRuntimeCapability-
             # ProfileError instead of the admission rejection under test.
-            attempt = self._build_attempt()
+            attempt_ref, attempt = self._real_attempt()
             with self.assertRaises(AdmissionRejectedError) as raised:
-                execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
+                execute(
+                    attempt_ref,
+                    attempt,
+                    self.root,
+                    str(FIXTURE_BINARY),
+                    TASK,
+                    self.state,
+                    self.run_id,
+                )
 
         self.assertEqual(raised.exception.reason, "required_capabilities_not_satisfied")
         self.assertFalse(self._spawned_report().exists())
@@ -309,12 +457,20 @@ class HostExecuteTest(unittest.TestCase):
         the ``_no_required_capabilities`` test seam.
         """
 
-        attempt = self._build_attempt()
+        attempt_ref, attempt = self._real_attempt()
         self.assertEqual(policy.M3_REQUIRED_CAPABILITIES, ())
 
-        result = execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
+        result = execute(
+            attempt_ref,
+            attempt,
+            self.root,
+            str(FIXTURE_BINARY),
+            TASK,
+            self.state,
+            self.run_id,
+        )
 
-        self.assertEqual(result.attempt, ATTEMPT_REF)
+        self.assertEqual(result.attempt, attempt_ref)
         self.assertTrue(self._spawned_report().is_file())
 
     def test_child_environment_is_allow_listed_not_inherited(self) -> None:
@@ -329,12 +485,20 @@ class HostExecuteTest(unittest.TestCase):
         which the parent cannot control and which is not ambient inheritance.
         """
 
-        attempt = self._build_attempt()
+        attempt_ref, attempt = self._real_attempt()
         with self._no_required_capabilities():
             with mock.patch.dict(
                 "os.environ", {SENTINEL_VARIABLE: "test-sentinel-secret-value"}
             ):
-                result = execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
+                result = execute(
+                    attempt_ref,
+                    attempt,
+                    self.root,
+                    str(FIXTURE_BINARY),
+                    TASK,
+                    self.state,
+                    self.run_id,
+                )
 
         report = json.loads(self._spawned_report().read_text(encoding="utf-8"))
         self.assertFalse(report["sentinel_secret_seen"])
@@ -366,9 +530,17 @@ class HostExecuteTest(unittest.TestCase):
         self.assertIn("success", precondition.stdout)
         self.assertFalse(self._spawned_report().exists())
 
-        attempt = self._build_attempt()
+        attempt_ref, attempt = self._real_attempt()
         with self._no_required_capabilities():
-            result = execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
+            result = execute(
+                attempt_ref,
+                attempt,
+                self.root,
+                str(FIXTURE_BINARY),
+                TASK,
+                self.state,
+                self.run_id,
+            )
 
         self.assertEqual(
             result.output_snapshot_digest, attempt.workspace_snapshot_digest
@@ -382,7 +554,7 @@ class HostExecuteTest(unittest.TestCase):
         self.assertFalse(self._spawned_report().exists())
 
     def test_binary_path_drift_between_probe_and_recheck_rejects(self) -> None:
-        attempt = self._build_attempt()
+        attempt_ref, attempt = self._real_attempt()
         other = self._copy_binary()
         self.assertNotEqual(other.resolve(), FIXTURE_BINARY.resolve())
         real_resolver = host._resolve_runtime_binary
@@ -397,12 +569,20 @@ class HostExecuteTest(unittest.TestCase):
         with self._no_required_capabilities():
             with mock.patch.object(host, "_resolve_runtime_binary", drifting_resolver):
                 with self.assertRaises(RuntimeSubstitutionRejectedError):
-                    execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
+                    execute(
+                        attempt_ref,
+                        attempt,
+                        self.root,
+                        str(FIXTURE_BINARY),
+                        TASK,
+                        self.state,
+                        self.run_id,
+                    )
 
         self.assertFalse(self._spawned_report().exists())
 
     def test_identity_drift_between_probe_and_recheck_rejects(self) -> None:
-        attempt = self._build_attempt()
+        attempt_ref, attempt = self._real_attempt()
         drift = self._drift_binary()
         real_probe = host.probe_opencode_profile
         probe_calls = {"count": 0}
@@ -416,7 +596,15 @@ class HostExecuteTest(unittest.TestCase):
         with self._no_required_capabilities():
             with mock.patch.object(host, "probe_opencode_profile", drifting_probe):
                 with self.assertRaises(RuntimeSubstitutionRejectedError):
-                    execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
+                    execute(
+                        attempt_ref,
+                        attempt,
+                        self.root,
+                        str(FIXTURE_BINARY),
+                        TASK,
+                        self.state,
+                        self.run_id,
+                    )
 
         self.assertFalse(self._spawned_report().exists())
 
@@ -436,15 +624,19 @@ class HostExecuteTest(unittest.TestCase):
 
     def test_declared_generated_path_escape_rejects_before_spawn(self) -> None:
         declared = ("../outside.txt",)
-        attempt = self._build_attempt(declared_generated_paths=declared)
+        attempt_ref, attempt = self._real_attempt(
+            declared_generated_paths=declared
+        )
         with self._no_required_capabilities():
             with self.assertRaises(AdmissionRejectedError) as raised:
                 execute(
-                    ATTEMPT_REF,
+                    attempt_ref,
                     attempt,
                     self.root,
                     str(FIXTURE_BINARY),
                     TASK,
+                    self.state,
+                    self.run_id,
                     declared_generated_paths=declared,
                 )
 
@@ -456,25 +648,35 @@ class HostExecuteTest(unittest.TestCase):
 
     def test_canary_stdout_does_not_block_default_nonretained_execution(self) -> None:
         (self.root / DIRECTIVE_NAME).write_text("stdout-canary", encoding="utf-8")
-        attempt = self._build_attempt()
+        attempt_ref, attempt = self._real_attempt()
 
         with self._no_required_capabilities():
-            result = execute(ATTEMPT_REF, attempt, self.root, str(FIXTURE_BINARY), TASK)
+            result = execute(
+                attempt_ref,
+                attempt,
+                self.root,
+                str(FIXTURE_BINARY),
+                TASK,
+                self.state,
+                self.run_id,
+            )
 
-        self.assertEqual(result.attempt, ATTEMPT_REF)
+        self.assertEqual(result.attempt, attempt_ref)
 
     def test_canary_stdout_blocks_retained_execution(self) -> None:
         (self.root / DIRECTIVE_NAME).write_text("stdout-canary", encoding="utf-8")
-        attempt = self._build_attempt()
+        attempt_ref, attempt = self._real_attempt()
 
         with self._no_required_capabilities():
             with self.assertRaises(RetentionBlockedError) as raised:
                 execute(
-                    ATTEMPT_REF,
+                    attempt_ref,
                     attempt,
                     self.root,
                     str(FIXTURE_BINARY),
                     TASK,
+                    self.state,
+                    self.run_id,
                     retain_evidence=True,
                 )
 
@@ -482,20 +684,174 @@ class HostExecuteTest(unittest.TestCase):
         self.assertNotIn("AKIAABCDEFGHIJKLMNOP", str(raised.exception))
 
     def test_ordinary_stdout_allows_retained_execution(self) -> None:
-        attempt = self._build_attempt()
+        attempt_ref, attempt = self._real_attempt()
 
         with self._no_required_capabilities():
             result = execute(
-                ATTEMPT_REF,
+                attempt_ref,
                 attempt,
                 self.root,
                 str(FIXTURE_BINARY),
                 TASK,
+                self.state,
+                self.run_id,
                 retain_evidence=True,
             )
 
-        self.assertEqual(result.attempt, ATTEMPT_REF)
+        self.assertEqual(result.attempt, attempt_ref)
         self.assertTrue(self._spawned_report().is_file())
+
+    def test_non_empty_contract_refs_rejected_fail_closed(self) -> None:
+        # M4 has no authority-verification path for contract_refs yet (see
+        # execution.context_compiler.UnverifiedContractRefError) — execute()
+        # must reject a non-empty contract_refs before any staleness/
+        # admission work, same as build_attempt_packet does at compile time
+        # (PR #47 review P1).
+        attempt_ref, attempt = self._real_attempt()
+        ref = RecordRef(
+            contract_kind="decision",
+            record_id="r1",
+            content_digest="sha256:agent-platform-json-v1:" + "a" * 64,
+        )
+        with self._no_required_capabilities():
+            with self.assertRaises(context_compiler.UnverifiedContractRefError):
+                execute(
+                    attempt_ref,
+                    attempt,
+                    self.root,
+                    str(FIXTURE_BINARY),
+                    TASK,
+                    self.state,
+                    self.run_id,
+                    contract_refs=(ref,),
+                )
+
+    def test_stale_context_pack_error_on_task_divergence(self) -> None:
+        """M4 third pre-spawn check (plan §9 MEDIUM 2): execute() must
+        re-derive the authoritative task from the run's committed Workflow
+        Revision — through the Kernel's own record read path — and reject an
+        execute-time ``task`` whose content diverges, raising
+        ``StaleContextPackError`` (never the older
+        StaleWorkspaceSnapshotError/StaleRuntimeCapabilityProfileError, whose
+        identities this fixture deliberately leaves undrifted).
+
+        This single fixture also covers the "authoritative task re-derivation"
+        case: passing a different, unpublished ``TaskV1`` with the same
+        ``task_id`` is exactly the same divergence, caught by the same
+        committed-record re-read before any recompile — a second, structurally
+        identical test would prove nothing further.
+        """
+
+        attempt_ref, attempt = self._real_attempt()
+        diverged = TaskV1(
+            task_id=TASK.task_id,
+            objective="objective that was never published for this run",
+            acceptance_criteria=TASK.acceptance_criteria,
+        )
+
+        with self._no_required_capabilities():
+            with self.assertRaises(StaleContextPackError) as raised:
+                execute(
+                    attempt_ref,
+                    attempt,
+                    self.root,
+                    str(FIXTURE_BINARY),
+                    diverged,
+                    self.state,
+                    self.run_id,
+                )
+
+        self.assertIn("diverged from the committed Workflow Revision task", str(raised.exception))
+        self.assertFalse(self._spawned_report().exists())
+
+    def test_disclosure_identity_drift_rejects(self) -> None:
+        """Plan §9: the packet is compiled with the default
+        ``run_message_template_revision="v1"``; executing the same otherwise
+        consistent chain with "v2" changes ``disclosure_identity`` and thus
+        ``ContextPack.digest`` — the recompiled digest no longer equals the
+        packet's bound ``context_digest`` and execute() must reject."""
+
+        attempt_ref, attempt = self._real_attempt()
+
+        with self._no_required_capabilities():
+            with self.assertRaises(StaleContextPackError) as raised:
+                execute(
+                    attempt_ref,
+                    attempt,
+                    self.root,
+                    str(FIXTURE_BINARY),
+                    TASK,
+                    self.state,
+                    self.run_id,
+                    run_message_template_revision="v2",
+                )
+
+        self.assertIn("recompiled context digest mismatch", str(raised.exception))
+        self.assertFalse(self._spawned_report().exists())
+
+    def test_render_labeled_sections_fixed_order(self) -> None:
+        """Plan §7: the spawned run message renders the Context Pack as
+        ``[source_class: scope]`` labeled sections in the compiler's
+        deterministic unit order — task.objective, task.acceptance_criteria,
+        workspace_snapshot, runtime_capability_profile. The derived labels
+        are matched as prefixes because the compiler's scopes carry a field
+        suffix (``workspace_snapshot.digest`` /
+        ``runtime_capability_profile.identity``)."""
+
+        attempt_ref, attempt = self._real_attempt()
+        with self._no_required_capabilities():
+            execute(
+                attempt_ref,
+                attempt,
+                self.root,
+                str(FIXTURE_BINARY),
+                TASK,
+                self.state,
+                self.run_id,
+            )
+
+        message = self._spawned_message()
+        labels = (
+            "[control: task.objective]",
+            "[control: task.acceptance_criteria]",
+            "[derived: workspace_snapshot",
+            "[derived: runtime_capability_profile",
+        )
+        positions = []
+        for label in labels:
+            self.assertIn(label, message)
+            positions.append(message.index(label))
+        self.assertEqual(
+            positions,
+            sorted(positions),
+            "labeled sections must appear in the compiler's fixed order",
+        )
+
+    def test_derived_unit_content_is_identity_not_raw_file_content(self) -> None:
+        """Plan §7: the ``[derived: workspace_snapshot]`` unit's content is
+        the snapshot *identity* string — never raw workspace file content,
+        file names, or paths."""
+
+        attempt_ref, attempt = self._real_attempt()
+        with self._no_required_capabilities():
+            execute(
+                attempt_ref,
+                attempt,
+                self.root,
+                str(FIXTURE_BINARY),
+                TASK,
+                self.state,
+                self.run_id,
+            )
+
+        message = self._spawned_message()
+        after_label = message.split("[derived: workspace_snapshot.digest]\n", 1)[1]
+        section_content = after_label.split("\n\n", 1)[0]
+
+        self.assertEqual(section_content, attempt.workspace_snapshot_digest)
+        self.assertTrue(section_content.startswith("sha256:"))
+        self.assertNotIn("tracked", message)
+        self.assertNotIn(str(self.root), message)
 
 
 if __name__ == "__main__":
