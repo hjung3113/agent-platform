@@ -87,9 +87,39 @@ class CONTEXT_BUDGET_EXCEEDED(Exception):
 
 
 class ConflictingContractRefError(Exception):
-    """Two admitted contract refs share record_id but differ in content_digest."""
+    """Two admitted contract refs share (contract_kind, record_id) but differ in content_digest."""
 
     pass
+
+
+class UnverifiedContractRefError(Exception):
+    """Non-empty ``contract_refs`` was rejected fail-closed.
+
+    M4 has no Decision/Contract record type or Kernel authority-verification
+    read path yet (plan §2: contract-ref compilation is "real machinery
+    exercised over an always-empty list today", the same YAGNI shape as
+    M3's ``M3_REQUIRED_CAPABILITIES = ()``). Accepting a caller-supplied
+    ``RecordRef`` here without verifying it was actually admitted/published
+    would let unverified data influence the authoritative Context Pack
+    (PR #47 review). Real callers (``execution.attempt.build_attempt_packet``,
+    ``execution.host.execute``) must reject any non-empty ``contract_refs``
+    until a real authority-verification path exists in a later milestone;
+    ``compile_context_pack`` itself stays a pure function that accepts them
+    (its dedup/ordering machinery is unit-tested directly), the gate lives
+    at the trust boundary instead.
+    """
+
+    pass
+
+
+def reject_unverified_contract_refs(contract_refs: tuple[RecordRef, ...]) -> None:
+    """Fail-closed guard for real (non-test) callers — see ``UnverifiedContractRefError``."""
+
+    if contract_refs:
+        raise UnverifiedContractRefError(
+            f"{len(contract_refs)} contract_refs supplied; M4 has no "
+            "authority-verification path for them yet, rejecting fail-closed"
+        )
 
 
 ESTIMATOR_IDENTITY = "byte_length_estimator@1"
@@ -99,19 +129,40 @@ def estimate_cost(content: str) -> int:
     return len(content.encode("utf-8"))
 
 
-# 128 KiB, comfortably under a conservative ARG_MAX floor — see plan §5.3 LOW 4.
-CONTEXT_BUDGET_MAX = 131072
+# ~117 KiB, safely under a conservative 128 KiB ARG_MAX floor — see plan
+# §5.3 LOW 4. The predicate this bounds is the ACTUAL rendered single-argv
+# message byte length (see ``compile_context_pack``'s reserved_cost
+# computation below, PR #47 review P1) plus the small fixed argv-elements
+# allowance, not merely an estimate of unit content.
+CONTEXT_BUDGET_MAX = 120000
 
-# Reserved cost for the runtime's own run-message envelope overhead only
-# (plan §5.2): the fixed argv cost of wrapping the rendered Context Pack,
-# beyond the pack's own content. A constant by design — not derived from
-# live state, and not a safety margin for the runtime's own unknowable
-# system-prompt size, which is genuinely outside this repo's visibility.
-# Shared by execution.attempt (compile time) and execution.host (execute
-# time) so both sides compute the identical reserved-cost/disclosure
-# identity — see attempt.py/host.py for why this must not drift between
-# compile and execute.
+# Reserved cost for the runtime's own argv elements OTHER than the
+# rendered message itself (plan §5.2) — the ``"run"``/``"--workdir"``/
+# workspace-path argv elements ``execution.host.execute`` spawns alongside
+# the message. A small constant by design — not a safety margin for the
+# runtime's own unknowable system-prompt size, which is genuinely outside
+# this repo's visibility. The rendered MESSAGE's own overhead (labels,
+# separators — PR #47 review P1) is accounted separately and exactly, not
+# folded into this constant; see ``compile_context_pack``.
 RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES = 64
+
+
+def render_context_pack(units: tuple[ContextUnit, ...]) -> str:
+    """Render Context Units as labeled sections (plan §7).
+
+    Each unit renders under a ``[source_class: scope]`` label so the
+    content/authority boundary survives rendering; unit order is the
+    compiler's deterministic order (§4), and unit content is used as-is
+    (the acceptance-criteria unit's content is already the compiler's
+    bullet-joined string — it is not re-split here). Single source of
+    truth for both ``execution.host``'s actual spawn rendering and this
+    module's own budget accounting (PR #47 review P1 — the two must never
+    diverge, or budget acceptance stops meaning "the real message fits").
+    """
+
+    return "\n".join(
+        f"[{unit.source_class}: {unit.scope}]\n{unit.content}\n" for unit in units
+    )
 
 
 def disclosure_identity(runtime_identity: str, run_message_template_revision: str) -> str:
@@ -137,6 +188,22 @@ def _utf16_sort_key(value: str) -> bytes:
     return value.encode("utf-16-be")
 
 
+def _conflict_key(ref: RecordRef) -> tuple[str, str]:
+    """Group key for conflict detection: (contract_kind, record_id).
+
+    Two refs with the same ``record_id`` but different ``contract_kind``
+    are different identities entirely (not the same logical thing under a
+    different digest) — they are neither duplicates of each other nor in
+    conflict with each other; they are just two distinct refs that happen
+    to share a record_id string in different id spaces. Only refs sharing
+    BOTH ``contract_kind`` and ``record_id`` can be the same logical ref
+    with drifted content, which is the actual conflict this function
+    detects (PR #47 review P1 — record_id alone under-keyed this).
+    """
+
+    return (ref.contract_kind, ref.record_id)
+
+
 def compile_context_pack(
     *,
     task_id: str,
@@ -145,19 +212,20 @@ def compile_context_pack(
     workspace_snapshot_digest: str,
     runtime_capability_profile_identity: str,
     contract_refs: tuple[RecordRef, ...] = (),
-    reserved_cost: int,
     disclosure_identity: str,
 ) -> ContextPack:
-    by_record_id: dict[str, list[RecordRef]] = {}
+    by_key: dict[tuple[str, str], list[RecordRef]] = {}
     for ref in contract_refs:
-        by_record_id.setdefault(ref.record_id, []).append(ref)
+        by_key.setdefault(_conflict_key(ref), []).append(ref)
 
-    sorted_record_ids = sorted(by_record_id, key=_utf16_sort_key)
-    for record_id in sorted_record_ids:
-        group = by_record_id[record_id]
+    sorted_keys = sorted(
+        by_key, key=lambda key: (_utf16_sort_key(key[0]), _utf16_sort_key(key[1]))
+    )
+    for key in sorted_keys:
+        group = by_key[key]
         if len({ref.content_digest for ref in group}) > 1:
             raise ConflictingContractRefError(
-                f"contract refs share record_id {record_id!r} "
+                f"contract refs share (contract_kind, record_id) {key!r} "
                 "but differ in content_digest"
             )
 
@@ -216,11 +284,11 @@ def compile_context_pack(
         "runtime capability identity at admission time",
         "required",
     )
-    for record_id in sorted_record_ids:
-        ref = by_record_id[record_id][0]
+    for key in sorted_keys:
+        ref = by_key[key][0]
         append_unit(
             "control",
-            f"contract_ref:{ref.record_id}",
+            f"contract_ref:{ref.contract_kind}:{ref.record_id}",
             "contract_ref",
             ref.content_digest,
             "admitted decision/contract reference",
@@ -233,6 +301,22 @@ def compile_context_pack(
     optional_cost = sum(
         unit.estimated_cost for unit in units if unit.requirement == "optional"
     )
+
+    # reserved_cost is computed here, not caller-supplied: the real
+    # rendered message's structural overhead (labels/separators, which
+    # grow with the unit count — PR #47 review P1) plus the small fixed
+    # argv-elements allowance. required_cost + optional_cost always equals
+    # sum(unit.estimated_cost for unit in units) since every unit is
+    # required or optional, so required_cost + optional_cost + reserved_cost
+    # equals exactly len(rendered_message.encode("utf-8")) +
+    # RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES — the predicate below bounds the
+    # real spawn argv size, not an estimate of it.
+    rendered_message = render_context_pack(tuple(units))
+    render_overhead = len(rendered_message.encode("utf-8")) - sum(
+        unit.estimated_cost for unit in units
+    )
+    reserved_cost = RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES + render_overhead
+
     if required_cost + optional_cost + reserved_cost > CONTEXT_BUDGET_MAX:
         raise CONTEXT_BUDGET_EXCEEDED(
             f"required_cost {required_cost} + optional_cost {optional_cost} "

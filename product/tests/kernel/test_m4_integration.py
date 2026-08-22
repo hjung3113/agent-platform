@@ -10,6 +10,7 @@ from kernel.canonical import content_digest
 from kernel.protocol import RecordRef
 from kernel.protocol_v1 import RequestV1, TaskV1
 from kernel.replay import replay
+from execution import context_compiler
 from execution.run_one_task import run_one_task
 from execution.workspace_snapshot import snapshot_identity
 
@@ -156,7 +157,7 @@ class M4IntegrationTests(unittest.TestCase):
         self.assertEqual(state.last_sequence, 6)
         self.assertEqual(state.last_record_id, chain.receipt.record_ref)
 
-    def test_admitted_contract_refs_flow_through_context_pack(self) -> None:
+    def test_empty_contract_refs_flow_through_context_pack(self) -> None:
         without_refs = self._run_one_task(
             TASK,
             expected_output_digest=snapshot_identity(
@@ -165,26 +166,27 @@ class M4IntegrationTests(unittest.TestCase):
             contract_refs=(),
             idempotency_prefix="run-empty-refs",
         )
-        with_refs = self._run_one_task(
-            TASK,
-            expected_output_digest=snapshot_identity(
-                self.workspace_root, ()
-            ).digest,
-            contract_refs=(CONTRACT_REF,),
-            idempotency_prefix="run-one-ref",
-        )
-
-        # Both runs complete the PASS-path chain to a Receipt.
         self.assertEqual(without_refs.verification_value.verdict, "PASS")
         self.assertIsNotNone(without_refs.receipt)
-        self.assertEqual(with_refs.verification_value.verdict, "PASS")
-        self.assertIsNotNone(with_refs.receipt)
 
-        # The admitted ref changes the compiled pack's identity.
-        self.assertNotEqual(
-            without_refs.attempt_value.context_digest,
-            with_refs.attempt_value.context_digest,
-        )
+    def test_non_empty_contract_refs_rejected_fail_closed(self) -> None:
+        # M4 has no Decision/Contract record type or Kernel authority-
+        # verification read path yet (plan §2) — a real caller supplying a
+        # non-empty contract_refs must be rejected fail-closed rather than
+        # having its unverified RecordRef silently trusted into the
+        # authoritative Context Pack (PR #47 review P1). The dedup/ordering
+        # machinery itself stays real and unit-tested directly in
+        # test_context_compiler.py; this only proves the real run_one_task
+        # entry point never lets an unverified ref through.
+        with self.assertRaises(context_compiler.UnverifiedContractRefError):
+            self._run_one_task(
+                TASK,
+                expected_output_digest=snapshot_identity(
+                    self.workspace_root, ()
+                ).digest,
+                contract_refs=(CONTRACT_REF,),
+                idempotency_prefix="run-one-ref",
+            )
 
     def test_adversarial_task_text_is_inert(self) -> None:
         chain = self._run_one_task(

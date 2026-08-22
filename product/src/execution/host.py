@@ -61,10 +61,10 @@ from kernel.runtime_capability import RuntimeCapabilityProfile
 
 from execution import policy
 from execution.context_compiler import (
-    RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES,
-    ContextPack,
     compile_context_pack,
     disclosure_identity,
+    reject_unverified_contract_refs,
+    render_context_pack,
 )
 from execution.opencode_adapter import probe_opencode_profile
 from execution.redaction import scan_for_retention
@@ -132,22 +132,6 @@ def _resolve_runtime_binary(opencode_binary_path: str) -> Path:
     if not (resolved.is_file() and os.access(resolved, os.X_OK)):
         raise ValueError(f"opencode binary is not an executable file: {resolved}")
     return resolved
-
-
-def _render_context_pack(pack: ContextPack) -> str:
-    """Render the Context Pack as labeled sections (plan §7).
-
-    Each unit renders under a ``[source_class: scope]`` label so the
-    content/authority boundary survives rendering; the unit order is the
-    compiler's deterministic order (§4), and unit content is used as-is
-    (the acceptance-criteria unit's content is already the compiler's
-    bullet-joined string — it is not re-split here).
-    """
-
-    return "\n".join(
-        f"[{unit.source_class}: {unit.scope}]\n{unit.content}\n"
-        for unit in pack.units
-    )
 
 
 def _child_environment() -> dict[str, str]:
@@ -279,6 +263,8 @@ def execute(
     control (see this module's docstring).
     """
 
+    reject_unverified_contract_refs(contract_refs)
+
     pre_snapshot = snapshot_identity(workspace_root, declared_generated_paths)
     if pre_snapshot.digest != attempt.workspace_snapshot_digest:
         raise StaleWorkspaceSnapshotError(
@@ -329,7 +315,6 @@ def execute(
             attempt.runtime_capability_profile_identity
         ),
         contract_refs=contract_refs,
-        reserved_cost=RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES,
         disclosure_identity=disclosure_identity(
             profile.identity, run_message_template_revision
         ),
@@ -369,7 +354,7 @@ def execute(
         [
             str(resolved_binary),
             "run",
-            _render_context_pack(context_pack),
+            render_context_pack(context_pack.units),
             "--workdir",
             str(resolved_root),
         ],

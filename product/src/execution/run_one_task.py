@@ -22,11 +22,7 @@ from kernel.publish import Published, Rejected, publish
 
 from execution import host
 from execution.attempt import build_attempt_packet, build_receipt
-from execution.context_compiler import (
-    RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES,
-    compile_context_pack,
-    disclosure_identity,
-)
+from execution.context_compiler import compile_context_pack, disclosure_identity
 from execution.context_evidence import write_context_evidence
 from verification.stub_verifier import stub_verify
 
@@ -181,15 +177,22 @@ def run_one_task(
             attempt_value.runtime_capability_profile_identity
         ),
         contract_refs=contract_refs,
-        reserved_cost=RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES,
         disclosure_identity=disclosure_identity(
             attempt_value.runtime_capability_profile_identity, "v1"
         ),
     )
     assert evidence_pack.digest == attempt_value.context_digest
-    write_context_evidence(
-        state, attempt_published.record_ref.record_id, evidence_pack
-    )
+    # Evidence is inspectable record-keeping only (execution/context_evidence.py's
+    # own docstring): nothing depends on this file existing, so a storage
+    # failure here must never abort an already-admitted, otherwise-successful
+    # run (PR #47 review P1 — evidence write had become a silent hard
+    # dependency of execution by being un-guarded ahead of host.execute()).
+    try:
+        write_context_evidence(
+            state, attempt_published.record_ref.record_id, evidence_pack
+        )
+    except OSError:
+        pass
 
     result_value = host.execute(
         attempt_published.record_ref,

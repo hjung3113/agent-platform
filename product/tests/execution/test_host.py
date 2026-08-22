@@ -22,7 +22,7 @@ from kernel.protocol_v1 import (
     read_result_v1,
 )
 from kernel.publish import Published, Rejected, publish
-from execution import host, policy
+from execution import context_compiler, host, policy
 from execution.attempt import build_attempt_packet
 from execution.host import (
     AdmissionRejectedError,
@@ -700,6 +700,31 @@ class HostExecuteTest(unittest.TestCase):
 
         self.assertEqual(result.attempt, attempt_ref)
         self.assertTrue(self._spawned_report().is_file())
+
+    def test_non_empty_contract_refs_rejected_fail_closed(self) -> None:
+        # M4 has no authority-verification path for contract_refs yet (see
+        # execution.context_compiler.UnverifiedContractRefError) — execute()
+        # must reject a non-empty contract_refs before any staleness/
+        # admission work, same as build_attempt_packet does at compile time
+        # (PR #47 review P1).
+        attempt_ref, attempt = self._real_attempt()
+        ref = RecordRef(
+            contract_kind="decision",
+            record_id="r1",
+            content_digest="sha256:agent-platform-json-v1:" + "a" * 64,
+        )
+        with self._no_required_capabilities():
+            with self.assertRaises(context_compiler.UnverifiedContractRefError):
+                execute(
+                    attempt_ref,
+                    attempt,
+                    self.root,
+                    str(FIXTURE_BINARY),
+                    TASK,
+                    self.state,
+                    self.run_id,
+                    contract_refs=(ref,),
+                )
 
     def test_stale_context_pack_error_on_task_divergence(self) -> None:
         """M4 third pre-spawn check (plan §9 MEDIUM 2): execute() must

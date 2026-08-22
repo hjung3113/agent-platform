@@ -162,7 +162,6 @@ class BuildAttemptPacketTest(unittest.TestCase):
             workspace_snapshot_digest=snapshot_identity(self.root).digest,
             runtime_capability_profile_identity=runtime_identity,
             contract_refs=(),
-            reserved_cost=context_compiler.RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES,
             disclosure_identity=context_compiler.disclosure_identity(
                 runtime_identity, "v1"
             ),

@@ -1,6 +1,65 @@
 # Handoff
 
-## Completed in this slice (M3 implementation)
+## Completed in this slice (M4 implementation)
+
+- M4 — deterministic Context Compiler implemented per
+  [`docs/plans/active/m4-deterministic-context-compiler.md`](docs/plans/active/m4-deterministic-context-compiler.md),
+  PR [#47](https://github.com/hjung3113/agent-platform/pull/47). Dispatched as a
+  dependency-ordered task DAG (`gpt-5.6-luna` max, `glm-5.3` high/low via opencode),
+  orchestrator (main session) verified/integrated between steps and caught one real
+  cross-task bug (compile-time placeholder reserved-cost vs execute-time real value would
+  have made every `execute()` call raise `StaleContextPackError`; fixed by hoisting the
+  shared constant/helper into `context_compiler.py`).
+- First review round (`chatgpt-codex-connector` automated PR review + repo owner
+  adversarial review on PR #47) found and fixed 4 real P1s and 3 P2s, all verified against
+  the actual committed code before fixing:
+  - `contract_refs` were accepted from any caller with zero authority verification (no
+    Decision/Contract record type/read path exists) — real callers
+    (`build_attempt_packet`, `host.execute`) now fail-closed reject any non-empty
+    `contract_refs` (`UnverifiedContractRefError`); `compile_context_pack` itself stays
+    pure/unit-tested so the dedup/ordering machinery isn't lost, the gate lives at the
+    trust boundary instead.
+  - Contract-ref dedup/conflict detection grouped by `record_id` alone, wrongly collapsing
+    two refs sharing a `record_id`+`content_digest` but differing `contract_kind`. Now
+    groups by `(contract_kind, record_id)`.
+  - Budget accounting's `reserved_cost` was a flat 64-byte guess, undercounting the real
+    labeled-section renderer's overhead (which grows with unit count) — a large-but-
+    accepted pack could still exceed the actual single-argv message size and hit `E2BIG` at
+    spawn instead of the typed compile-time budget error. `reserved_cost` is now computed
+    inside `compile_context_pack` from the real rendered message (`render_context_pack`,
+    moved into `context_compiler.py` as the single source of truth for both the actual
+    spawn rendering and the budget predicate) plus a small fixed argv-elements allowance;
+    `CONTEXT_BUDGET_MAX` lowered from exactly 128 KiB to ~117 KiB so the "comfortably
+    under" comment is true again.
+  - Evidence-file writing (documented as non-authoritative record-keeping) was an
+    unguarded synchronous call ahead of `host.execute()` in `run_one_task.py` — a storage
+    failure there would abort an already-admitted run. Now wrapped in `try/except OSError`
+    so it can never block execution, matching the documented semantics.
+  - (P2) Evidence writes used a fixed per-attempt temp filename, so two concurrent
+    idempotent-retry writers for the same Attempt could race and one's `os.replace` could
+    lose its source file; now uses `tempfile.mkstemp` for a unique temp name per call.
+  - (P2) `build_attempt_packet` didn't fail-closed-check `task_id` against `task.task_id`/
+    the committed revision's `task_id` directly (relied on `publish()`'s downstream
+    `ATTEMPT_TASK_BINDING_MISMATCH` check, not a bypass but a docstring-contract gap); now
+    checked explicitly.
+  - (P2) This file's M4 section still described M4 as future work while the PR already
+    contained the implementation — updated (this entry).
+  - Optional/omission machinery (`OmissionRecord`, optional-cost accounting) remains real
+    but structurally unreachable — no code path ever constructs an optional `ContextUnit` —
+    flagged as dead scaffold by the owner review; **not removed this round** (explicit
+    settled design decision from M4 design-grilling round 2, same forward-compatible-shape
+    precedent as `M3_REQUIRED_CAPABILITIES = ()`), but worth revisiting if a second review
+    round still calls it out.
+- 306 tests total, all green (`test_context_compiler.py` grew to 13, plus new
+  contract-kind-dedup, budget-matches-real-render, and contract-refs-rejection coverage in
+  `test_attempt.py`/`test_host.py`/`test_m4_integration.py`).
+- **Not yet done**: plan §14's second-round post-implementation adversarial review
+  (`glm-5.3` high) — M3's second round caught 14 more real defects a single
+  pre-implementation review missed; the PR #47 review thread above was a *first* real-code
+  review (by codex-connector + the repo owner, not yet a dedicated `glm-5.3` high pass), so
+  budget for one more round before treating M4 as closed the way M3's plan §14 was.
+
+## Completed in prior slice (M3 implementation)
 
 - M3 — Real Host/security boundary and first runtime adapter (OpenCode) implemented and
   merged per [`docs/plans/active/m3-real-host-security-boundary.md`](docs/plans/active/m3-real-host-security-boundary.md),

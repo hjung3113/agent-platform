@@ -14,8 +14,10 @@ from kernel.protocol_v1 import (
     TaskV1,
     WorkflowRevisionV1,
 )
+from kernel.protocol import RecordRef
 from kernel.publish import Published, Rejected, publish
 from execution import attempt as attempt_module
+from execution import context_compiler
 from execution.attempt import build_attempt_packet
 
 
@@ -155,6 +157,38 @@ class AttemptPacketRealIdentityTest(unittest.TestCase):
             changed_workspace.runtime_capability_profile_identity,
             changed_runtime.runtime_capability_profile_identity,
         )
+
+    def test_task_id_argument_disagrees_with_task_rejects(self) -> None:
+        with self.assertRaises(attempt_module.TaskBindingMismatchError):
+            build_attempt_packet(
+                workflow_revision_ref=self.workflow_revision_ref,
+                task_id="a-different-task-id",
+                implementer_identity="impl-1",
+                state=self.state,
+                run_id=self.run_id,
+                task=TASK,
+                workspace_root=self.root,
+                opencode_binary_path=str(FIXTURE_BINARY),
+            )
+
+    def test_non_empty_contract_refs_rejected_fail_closed(self) -> None:
+        ref = RecordRef(
+            contract_kind="decision",
+            record_id="r1",
+            content_digest="sha256:agent-platform-json-v1:" + "a" * 64,
+        )
+        with self.assertRaises(context_compiler.UnverifiedContractRefError):
+            build_attempt_packet(
+                workflow_revision_ref=self.workflow_revision_ref,
+                task_id=TASK_ID,
+                implementer_identity="impl-1",
+                state=self.state,
+                run_id=self.run_id,
+                task=TASK,
+                workspace_root=self.root,
+                opencode_binary_path=str(FIXTURE_BINARY),
+                contract_refs=(ref,),
+            )
 
     def test_binding_mismatch_rejects(self) -> None:
         mutated_task = TaskV1(

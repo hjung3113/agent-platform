@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
 from execution.context_compiler import ContextPack
@@ -21,19 +22,28 @@ def write_context_evidence(state: str, attempt_record_id: str, pack: ContextPack
     """Atomically write one Attempt's full Context Pack as JSON evidence.
 
     Mirrors ``kernel.lineage_store``'s temp-file + rename idiom so a crash
-    mid-write never leaves a partial evidence file. Returns the final path.
+    mid-write never leaves a partial evidence file. The temp file gets a
+    unique name per call (``tempfile.mkstemp``, same directory as the
+    final path) rather than a fixed ``{record_id}.json.tmp`` name, so two
+    concurrent writers for the same ``attempt_record_id`` (e.g. two
+    idempotent-retry callers) never race on the same temp path and cause
+    one writer's ``os.replace`` to lose its source file out from under it.
+    Returns the final path.
     """
 
     evidence_dir = Path(state) / "context-evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
     final_path = evidence_dir / f"{attempt_record_id}.json"
-    temp_path = evidence_dir / f".{attempt_record_id}.json.tmp"
     payload = json.dumps(pack.to_canonical_value(), indent=2, ensure_ascii=False)
-    with open(temp_path, "w", encoding="utf-8") as temp_file:
-        temp_file.write(payload)
-        temp_file.flush()
-        os.fsync(temp_file.fileno())
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{attempt_record_id}.", suffix=".tmp", dir=evidence_dir
+    )
+    temp_path = Path(temp_name)
     try:
+        with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
+            temp_file.write(payload)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
         os.replace(temp_path, final_path)
     except BaseException:
         temp_path.unlink(missing_ok=True)

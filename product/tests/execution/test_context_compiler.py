@@ -18,7 +18,6 @@ FIXED_ARGS = {
     "task_acceptance_criteria": ("crit a", "crit b"),
     "workspace_snapshot_digest": "sha256:agent-platform-json-v1:deadbeef",
     "runtime_capability_profile_identity": "sha256:agent-platform-json-v1:cafef00d",
-    "reserved_cost": 0,
     "disclosure_identity": "disc1",
 }
 
@@ -71,10 +70,32 @@ class ContextCompilerDeterminismTest(unittest.TestCase):
 
 class ContextCompilerContractRefTest(unittest.TestCase):
     def test_dedup_true_duplicate(self) -> None:
+        # Same (contract_kind, record_id, content_digest) triple twice ->
+        # one unit. Same contract_kind is load-bearing here (PR #47 review
+        # P1) — see test_different_contract_kind_same_record_id_not_deduped
+        # for the case this must NOT collapse.
         duplicate_a = make_ref("r1", "d1", contract_kind="decision")
-        duplicate_b = make_ref("r1", "d1", contract_kind="contract")
+        duplicate_b = make_ref("r1", "d1", contract_kind="decision")
         pack = compile_(contract_refs=(duplicate_a, duplicate_b))
         self.assertEqual(len(pack.units), 5)
+
+    def test_different_contract_kind_same_record_id_not_deduped(self) -> None:
+        # Two refs sharing record_id AND content_digest but differing
+        # contract_kind are different identities in different id spaces,
+        # not duplicates of one thing and not a conflict either — both must
+        # survive as distinct units (PR #47 review P1: record_id-only
+        # grouping wrongly collapsed this pair).
+        ref_a = make_ref("r1", "d1", contract_kind="decision")
+        ref_b = make_ref("r1", "d1", contract_kind="contract")
+        pack = compile_(contract_refs=(ref_a, ref_b))
+        self.assertEqual(len(pack.units), 6)
+        contract_ref_identities = [
+            unit.source_identity for unit in pack.units if unit.scope == "contract_ref"
+        ]
+        self.assertEqual(
+            set(contract_ref_identities),
+            {"contract_ref:decision:r1", "contract_ref:contract:r1"},
+        )
 
     def test_conflicting_contract_ref_raises(self) -> None:
         ref_a = make_ref("r1", "d1")
@@ -84,24 +105,66 @@ class ContextCompilerContractRefTest(unittest.TestCase):
         with self.assertRaises(ConflictingContractRefError):
             compile_(contract_refs=(ref_b, ref_a))
 
+    def test_different_contract_kind_same_record_id_different_digest_no_conflict(
+        self,
+    ) -> None:
+        # Different contract_kind means different identity spaces, so a
+        # differing content_digest under a different contract_kind is not
+        # the same-ref-drifted-content case ConflictingContractRefError
+        # exists to catch — it must compile cleanly as two distinct refs.
+        ref_a = make_ref("r1", "d1", contract_kind="decision")
+        ref_b = make_ref("r1", "d2", contract_kind="contract")
+        pack = compile_(contract_refs=(ref_a, ref_b))
+        self.assertEqual(len(pack.units), 6)
+
 
 class ContextCompilerBudgetTest(unittest.TestCase):
     def test_budget_exceeded_required_alone(self) -> None:
-        required_cost = compile_().required_cost
-        with patch("execution.context_compiler.CONTEXT_BUDGET_MAX", required_cost - 1):
+        baseline = compile_()
+        total = baseline.required_cost + baseline.optional_cost + baseline.reserved_cost
+        with patch("execution.context_compiler.CONTEXT_BUDGET_MAX", total - 1):
             with self.assertRaises(CONTEXT_BUDGET_EXCEEDED):
                 compile_()
 
     def test_budget_exceeded_required_plus_reserved(self) -> None:
-        required_cost = compile_().required_cost
-        reserved = 100
-        # passes when budget covers required + reserved
-        with patch("execution.context_compiler.CONTEXT_BUDGET_MAX", required_cost + reserved):
-            compile_(reserved_cost=reserved)
-        # raises when budget sits strictly between required and required + reserved
-        with patch("execution.context_compiler.CONTEXT_BUDGET_MAX", required_cost + reserved - 1):
+        # reserved_cost is now computed internally from the real rendered
+        # message (PR #47 review P1), so drive the boundary by adding
+        # contract_refs (which grow reserved_cost's render-overhead
+        # component) rather than by passing a reserved_cost override.
+        baseline = compile_(contract_refs=())
+        with_ref = compile_(contract_refs=(make_ref("r1", "d1"),))
+        baseline_total = (
+            baseline.required_cost + baseline.optional_cost + baseline.reserved_cost
+        )
+        with_ref_total = (
+            with_ref.required_cost + with_ref.optional_cost + with_ref.reserved_cost
+        )
+        self.assertGreater(with_ref_total, baseline_total)
+        # passes when budget covers the real total
+        with patch("execution.context_compiler.CONTEXT_BUDGET_MAX", with_ref_total):
+            compile_(contract_refs=(make_ref("r1", "d1"),))
+        # raises when budget sits below the real total (even though it
+        # covers required_cost alone) — proves required+reserved, not
+        # required alone, is what's enforced
+        with patch("execution.context_compiler.CONTEXT_BUDGET_MAX", with_ref_total - 1):
             with self.assertRaises(CONTEXT_BUDGET_EXCEEDED):
-                compile_(reserved_cost=reserved)
+                compile_(contract_refs=(make_ref("r1", "d1"),))
+
+    def test_budget_predicate_matches_real_rendered_message_size(self) -> None:
+        # PR #47 review P1: the accounted total must equal the actual
+        # rendered single-argv message size (plus the small fixed argv
+        # allowance), not merely an under-count of unit content bytes.
+        from execution.context_compiler import (
+            RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES,
+            render_context_pack,
+        )
+
+        pack = compile_(contract_refs=(make_ref("r1", "d1"),))
+        rendered_bytes = len(render_context_pack(pack.units).encode("utf-8"))
+        accounted_total = pack.required_cost + pack.optional_cost + pack.reserved_cost
+        self.assertEqual(
+            accounted_total, rendered_bytes + RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES
+        )
 
 
 class ContextCompilerUnitTest(unittest.TestCase):

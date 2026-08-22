@@ -25,9 +25,9 @@ from kernel.protocol_v1 import (
 )
 from kernel.publish import read_committed_contract
 from execution.context_compiler import (
-    RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES,
     compile_context_pack,
     disclosure_identity,
+    reject_unverified_contract_refs,
 )
 from execution.opencode_adapter import probe_opencode_profile
 from execution.workspace_snapshot import snapshot_identity
@@ -64,6 +64,14 @@ def build_attempt_packet(
     the authoritative task, both derived identities, and ``contract_refs``.
     """
 
+    reject_unverified_contract_refs(contract_refs)
+
+    if task_id != task.task_id:
+        raise TaskBindingMismatchError(
+            f"task_id argument {task_id!r} disagrees with task.task_id "
+            f"{task.task_id!r}"
+        )
+
     revision_ref, revision = read_committed_contract(
         state, run_id, ContractKind.WORKFLOW_REVISION
     )
@@ -71,6 +79,11 @@ def build_attempt_packet(
         raise TaskBindingMismatchError(
             "workflow_revision_ref binding mismatch: "
             f"caller_ref={workflow_revision_ref} committed_ref={revision_ref}"
+        )
+    if revision.task.task_id != task_id:
+        raise TaskBindingMismatchError(
+            f"task_id argument {task_id!r} disagrees with the committed "
+            f"Workflow Revision's task_id {revision.task.task_id!r}"
         )
     committed_task_digest = content_digest(revision.task.to_canonical_value())
     caller_task_digest = content_digest(task.to_canonical_value())
@@ -87,11 +100,13 @@ def build_attempt_packet(
     profile_identity = probe_opencode_profile(
         opencode_binary_path, config_paths
     ).identity
-    # reserved_cost/disclosure_identity must match host.execute()'s third
-    # pre-spawn recheck exactly (same shared constant/helper, same
-    # run_message_template_revision default) — a mismatch here would make
-    # every execute() call raise StaleContextPackError even with no real
-    # drift, since compile time and execute time would never agree.
+    # disclosure_identity must match host.execute()'s third pre-spawn
+    # recheck exactly (same shared helper, same run_message_template_revision
+    # default) — a mismatch here would make every execute() call raise
+    # StaleContextPackError even with no real drift, since compile time and
+    # execute time would never agree. reserved_cost is computed inside
+    # compile_context_pack itself now (from the real rendered message), not
+    # passed in — see context_compiler.py's compile_context_pack docstring.
     context_pack = compile_context_pack(
         task_id=task_id,
         task_objective=task.objective,
@@ -99,7 +114,6 @@ def build_attempt_packet(
         workspace_snapshot_digest=snapshot_digest,
         runtime_capability_profile_identity=profile_identity,
         contract_refs=contract_refs,
-        reserved_cost=RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES,
         disclosure_identity=disclosure_identity(
             profile_identity, run_message_template_revision
         ),
