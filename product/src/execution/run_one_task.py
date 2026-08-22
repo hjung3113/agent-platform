@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kernel.protocol import ParsedCandidate, read_candidate
+from kernel.protocol import ParsedCandidate, RecordRef, read_candidate
 from kernel.protocol_v1 import (
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
@@ -22,6 +22,12 @@ from kernel.publish import Published, Rejected, publish
 
 from execution import host
 from execution.attempt import build_attempt_packet, build_receipt
+from execution.context_compiler import (
+    RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES,
+    compile_context_pack,
+    disclosure_identity,
+)
+from execution.context_evidence import write_context_evidence
 from verification.stub_verifier import stub_verify
 
 
@@ -109,6 +115,7 @@ def run_one_task(
     expected_output_digest: str,
     config_paths: tuple[Path, ...] = (),
     declared_generated_paths: tuple[str, ...] = (),
+    contract_refs: tuple[RecordRef, ...] = (),
     idempotency_prefix: str = "run",
 ) -> RunOneTaskResult:
     """Run and publish the M3 Request-to-Receipt one-task chain."""
@@ -143,10 +150,14 @@ def run_one_task(
         workflow_revision_ref=workflow_published.record_ref,
         task_id=task.task_id,
         implementer_identity=implementer_identity,
+        state=state,
+        run_id=request_published.run_id,
+        task=task,
         workspace_root=workspace_root,
         opencode_binary_path=opencode_binary_path,
         config_paths=config_paths,
         declared_generated_paths=declared_generated_paths,
+        contract_refs=contract_refs,
     )
     attempt_published = _require_published(
         "attempt_packet",
@@ -159,14 +170,38 @@ def run_one_task(
         ),
     )
 
+    # Evidence-only recompile with identical inputs (pure, side-effect-free);
+    # by construction it must reproduce the packet's compiled context digest.
+    evidence_pack = compile_context_pack(
+        task_id=task.task_id,
+        task_objective=task.objective,
+        task_acceptance_criteria=task.acceptance_criteria,
+        workspace_snapshot_digest=attempt_value.workspace_snapshot_digest,
+        runtime_capability_profile_identity=(
+            attempt_value.runtime_capability_profile_identity
+        ),
+        contract_refs=contract_refs,
+        reserved_cost=RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES,
+        disclosure_identity=disclosure_identity(
+            attempt_value.runtime_capability_profile_identity, "v1"
+        ),
+    )
+    assert evidence_pack.digest == attempt_value.context_digest
+    write_context_evidence(
+        state, attempt_published.record_ref.record_id, evidence_pack
+    )
+
     result_value = host.execute(
         attempt_published.record_ref,
         attempt_value,
         workspace_root,
         opencode_binary_path,
         task,
+        state,
+        request_published.run_id,
         config_paths,
         declared_generated_paths,
+        contract_refs=contract_refs,
     )
     result_published = _require_published(
         "result",

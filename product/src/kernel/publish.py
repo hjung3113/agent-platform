@@ -245,6 +245,20 @@ def _committed_contract(
     return _record_ref_of(envelope), parsed_candidate.value
 
 
+def read_committed_contract(
+    state: str, run_id: str, contract_kind: ContractKind
+) -> tuple[RecordRef, Any]:
+    """Re-read a run's one committed record of a kind, typed.
+
+    Public re-read path for callers (e.g. M4's Context Compiler binding
+    check) that must verify a caller-held value still matches the
+    authoritative published record, not a second writer — this only reads.
+    """
+
+    run = open_run(state, run_id)
+    return _committed_contract(run, contract_kind)
+
+
 def _find_idempotent_publish(
     run: RunHandle, idempotency_key: str, digest: str
 ) -> RecordRef | Rejected | None:

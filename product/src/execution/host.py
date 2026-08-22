@@ -25,6 +25,21 @@ PARTIAL/UNKNOWN statuses plus ``admit_attempt``'s fail-closed ``require()``
 are the control for the axes this milestone cannot really enforce — no fake
 enforcement code exists here for them.
 
+M4 (plan §6/§7) additionally binds the Attempt's context: ``execute()``
+re-reads the run's committed Workflow Revision through the Kernel's own
+record read path, recompiles the Context Pack from execute-time parameters,
+and rejects any divergence from the packet's bound ``context_digest`` as
+``StaleContextPackError``. That third pre-spawn check is compile/execute
+parameter-consistency binding plus an authoritative re-derivation the caller
+cannot spoof — stated honestly, it is *not* a same-inputs recompute that
+catches compiler bugs: a deterministically-wrong compiler reproduces the
+same wrong digest at compile and recheck both, and that class of defect is a
+correctness bug for the compiler's own test suite, not something this
+recheck can detect. What it catches is divergence between what was compiled
+and what execute-time parameters/authoritative state now say. The runtime's
+``run`` message renders the pack as labeled per-source-class sections
+(plan §7) so the content/authority boundary survives rendering.
+
 The execution-layer errors below are deliberately not
 ``PublishRejectionCode`` values: when one fires no Kernel record is produced,
 because no Result exists for a run that never executed.
@@ -38,11 +53,19 @@ import subprocess
 from pathlib import Path
 
 from kernel import admission
-from kernel.protocol import RecordRef
+from kernel.canonical import content_digest
+from kernel.protocol import ContractKind, RecordRef
 from kernel.protocol_v1 import AttemptPacketV1, ResultV1, RuntimeObservationV1, TaskV1
+from kernel.publish import read_committed_contract
 from kernel.runtime_capability import RuntimeCapabilityProfile
 
 from execution import policy
+from execution.context_compiler import (
+    RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES,
+    ContextPack,
+    compile_context_pack,
+    disclosure_identity,
+)
 from execution.opencode_adapter import probe_opencode_profile
 from execution.redaction import scan_for_retention
 from execution.workspace_snapshot import snapshot_identity
@@ -54,6 +77,12 @@ class StaleWorkspaceSnapshotError(Exception):
 
 class StaleRuntimeCapabilityProfileError(Exception):
     """Live runtime profile identity no longer matches the Attempt Packet."""
+
+
+class StaleContextPackError(Exception):
+    """Recompiled context_digest, from execute-time parameters and the
+    re-read published task, no longer matches the Attempt Packet's bound
+    value."""
 
 
 class RuntimeSubstitutionRejectedError(Exception):
@@ -105,22 +134,20 @@ def _resolve_runtime_binary(opencode_binary_path: str) -> Path:
     return resolved
 
 
-def _task_message(task: TaskV1) -> str:
-    """Render the admitted task's authoritative description for the runtime.
+def _render_context_pack(pack: ContextPack) -> str:
+    """Render the Context Pack as labeled sections (plan §7).
 
-    PR review: an earlier draft spawned OpenCode with no task information at
-    all, so the fake runtime (and any real one) succeeded independently of
-    what was actually admitted — the E2E chain proved protocol wiring but
-    not that the published task's objective/acceptance criteria reached
-    execution. This is the exact, lineage-checked ``TaskV1`` the driver
-    already holds (not arbitrary compiled context — that stays M4 scope);
-    rendering it as the ``run`` message mirrors OpenCode's own
-    ``run [message..]`` positional-argument shape.
+    Each unit renders under a ``[source_class: scope]`` label so the
+    content/authority boundary survives rendering; the unit order is the
+    compiler's deterministic order (§4), and unit content is used as-is
+    (the acceptance-criteria unit's content is already the compiler's
+    bullet-joined string — it is not re-split here).
     """
 
-    lines = [task.objective, "", "Acceptance criteria:"]
-    lines.extend(f"- {criterion}" for criterion in task.acceptance_criteria)
-    return "\n".join(lines)
+    return "\n".join(
+        f"[{unit.source_class}: {unit.scope}]\n{unit.content}\n"
+        for unit in pack.units
+    )
 
 
 def _child_environment() -> dict[str, str]:
@@ -193,19 +220,50 @@ def execute(
     workspace_root: Path,
     opencode_binary_path: str,
     task: TaskV1,
+    state: str,
+    run_id: str,
     config_paths: tuple[Path, ...] = (),
     declared_generated_paths: tuple[str, ...] = (),
     *,
+    contract_refs: tuple[RecordRef, ...] = (),
     retain_evidence: bool = False,
     requested_effects: tuple[str, ...] = (),
+    run_message_template_revision: str = "v1",
 ) -> ResultV1:
     """Execute one Attempt inside the deny-first M3 envelope (plan §6).
 
-    ``task`` is the authoritative published ``TaskV1`` this Attempt binds to
-    (the caller's already-verified ``workflow_revision.task``); its
-    objective/acceptance criteria are rendered as the runtime's ``run``
-    message so the spawned process actually receives the admitted task
-    (PR review — a prior draft spawned OpenCode with no task information).
+    ``task`` is the authoritative published ``TaskV1`` this Attempt binds to;
+    ``state``/``run_id`` locate the run whose committed Workflow Revision the
+    third pre-spawn check re-reads; ``contract_refs`` are the admitted
+    decision/contract refs the Attempt's Context Pack was compiled with
+    (empty in every real M4 path — same frozen-candidate shape as compile
+    time).
+
+    Third pre-spawn check (M4 plan §6), run after the snapshot/profile
+    staleness checks and before admission. Two independent things: (a)
+    authoritative re-derivation — the run's committed Workflow Revision is
+    re-read through the Kernel's own record read path and both its ref and
+    its task's canonical-value digest must match the packet's bound
+    ``workflow_revision`` and the execute-time ``task``; (b)
+    parameter-consistency recompile — the Context Pack is recompiled from
+    execute-time parameters (using the packet's own snapshot/profile
+    identities, already reverified fresh by the two checks above) and its
+    digest must equal ``attempt.context_digest``. Stated honestly: this is
+    NOT a same-inputs recompute that catches compiler bugs — a
+    deterministically-wrong compiler reproduces the same wrong digest at
+    compile and recheck both, and that class of defect is a correctness bug
+    caught by the compiler's own test suite, not by this check. What it
+    catches is divergence between what was compiled and what execute-time
+    parameters/authoritative state now say — a different ``task``/refs than
+    were compiled, or render-template drift via
+    ``run_message_template_revision`` (a version tag for the labeled-section
+    rendering shape; bump it whenever that rendering changes) — and it
+    rejects as ``StaleContextPackError`` rather than silently recompiling or
+    expanding context.
+
+    The rendered ``run`` message is that recompiled Context Pack rendered as
+    labeled ``[source_class: scope]`` sections (plan §7), computed once and
+    used for both the digest check and the spawn argv.
 
     ``declared_generated_paths`` entries become the admission request's
     candidate write paths, interpreted as relative paths under the resolved
@@ -237,6 +295,51 @@ def execute(
             f"live={profile.identity}"
         )
 
+    # Third pre-spawn check (M4 plan §6) — two independent bindings, after
+    # the two checks above so it never re-litigates the snapshot/profile
+    # identities those checks already own.
+    revision_ref, revision = read_committed_contract(
+        state, run_id, ContractKind.WORKFLOW_REVISION
+    )
+    if revision_ref != attempt.workflow_revision:
+        raise StaleContextPackError(
+            "committed workflow revision ref diverged from the Attempt "
+            "Packet's bound ref: "
+            f"attempt={attempt.workflow_revision} committed={revision_ref}"
+        )
+    committed_task_digest = content_digest(revision.task.to_canonical_value())
+    execute_task_digest = content_digest(task.to_canonical_value())
+    if committed_task_digest != execute_task_digest:
+        raise StaleContextPackError(
+            "execute-time task diverged from the committed Workflow "
+            "Revision task: "
+            f"execute_task_digest={execute_task_digest} "
+            f"committed_task_digest={committed_task_digest}"
+        )
+
+    # Uses the packet's own bound snapshot/profile identities (reverified
+    # fresh above); this recompile's job is catching task/refs/render-
+    # template drift, not recomputing those identities.
+    context_pack = compile_context_pack(
+        task_id=attempt.task_id,
+        task_objective=task.objective,
+        task_acceptance_criteria=task.acceptance_criteria,
+        workspace_snapshot_digest=attempt.workspace_snapshot_digest,
+        runtime_capability_profile_identity=(
+            attempt.runtime_capability_profile_identity
+        ),
+        contract_refs=contract_refs,
+        reserved_cost=RUN_MESSAGE_ENVELOPE_OVERHEAD_BYTES,
+        disclosure_identity=disclosure_identity(
+            profile.identity, run_message_template_revision
+        ),
+    )
+    if context_pack.digest != attempt.context_digest:
+        raise StaleContextPackError(
+            "recompiled context digest mismatch: "
+            f"attempt={attempt.context_digest} recomputed={context_pack.digest}"
+        )
+
     resolved_root = Path(pre_snapshot.root)
     request = admission.AttemptRequest(
         workspace_root=resolved_root,
@@ -266,7 +369,7 @@ def execute(
         [
             str(resolved_binary),
             "run",
-            _task_message(task),
+            _render_context_pack(context_pack),
             "--workdir",
             str(resolved_root),
         ],
