@@ -1,7 +1,7 @@
 {
   "contract_kind": "verification",
   "protocol_version": 1,
-  "schema_version": 1,
+  "schema_version": 2,
   "payload": {
     "result": {
       "contract_kind": "result",
@@ -13,15 +13,18 @@
       {
         "criterion": "Every unsupported contract, protocol, or schema combination rejects",
         "status": "SATISFIED",
-        "evidence_digest": "sha256:agent-platform-json-v1:162495ee90155423030f305bc49c79851391e2d3d8b7180cea2f9ab592c3a1ad"
+        "evidence_digest": "sha256:agent-platform-json-v1:162495ee90155423030f305bc49c79851391e2d3d8b7180cea2f9ab592c3a1ad",
+        "evidence_class": "result_snapshot_digest_equality@1"
       },
       {
         "criterion": "Golden canonical bytes and digests stay fixed",
         "status": "SATISFIED",
-        "evidence_digest": "sha256:agent-platform-json-v1:162495ee90155423030f305bc49c79851391e2d3d8b7180cea2f9ab592c3a1ad"
+        "evidence_digest": "sha256:agent-platform-json-v1:162495ee90155423030f305bc49c79851391e2d3d8b7180cea2f9ab592c3a1ad",
+        "evidence_class": "result_snapshot_digest_equality@1"
       }
     ],
     "verdict": "PASS",
-    "findings": []
+    "findings": [],
+    "verifier_runtime_capability_profile_identity": "sha256:agent-platform-json-v1:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
   }
 }

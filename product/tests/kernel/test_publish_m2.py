@@ -7,8 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from kernel.canonical import content_digest
 from kernel.lineage_store import open_run
 from kernel.protocol import ParsedCandidate, RecordRef, read_candidate
+from kernel.protocol_v1 import RESULT_SNAPSHOT_EVIDENCE_CLASS
 from kernel.publish import (
     Published,
     PublishRejectionCode,
@@ -18,6 +20,8 @@ from kernel.publish import (
 
 OTHER_DIGEST = "sha256:agent-platform-json-v1:" + "f" * 64
 OUTPUT_SNAPSHOT_DIGEST = "sha256:agent-platform-json-v1:" + "e" * 64
+RUNTIME_PROFILE_IDENTITY = content_digest({"fixture": "runtime-profile-m2"})
+VERIFIER_PROFILE_IDENTITY = content_digest({"fixture": "verifier-profile-m2"})
 TASK_ID = "task-1"
 IMPLEMENTER_IDENTITY = "implementer-1"
 VERIFIER_IDENTITY = "verifier-1"
@@ -97,7 +101,7 @@ def dispatch_attempt(
                 "implementer_identity": implementer_identity,
                 "context_digest": "fixture-context-m2",
                 "workspace_snapshot_digest": "fixture-workspace-m2",
-                "runtime_capability_profile_identity": "fixture-runtime-m2",
+                "runtime_capability_profile_identity": RUNTIME_PROFILE_IDENTITY,
             },
         }
     )
@@ -108,6 +112,7 @@ def dispatch_attempt(
 def dispatch_result(
     attempt: RecordRef,
     output_snapshot_digest: str = OUTPUT_SNAPSHOT_DIGEST,
+    runtime_identity: str = RUNTIME_PROFILE_IDENTITY,
 ) -> ParsedCandidate:
     """Build a validated Result candidate bound to ``attempt``."""
 
@@ -120,7 +125,7 @@ def dispatch_result(
                 "attempt": attempt.to_canonical_value(),
                 "output_snapshot_digest": output_snapshot_digest,
                 "observation": {
-                    "runtime_identity": "runtime-m2",
+                    "runtime_identity": runtime_identity,
                     "output_snapshot_digest": output_snapshot_digest,
                 },
             },
@@ -135,15 +140,38 @@ def satisfied(criterion: str, evidence_digest: str) -> dict:
         "criterion": criterion,
         "status": "SATISFIED",
         "evidence_digest": evidence_digest,
+        "evidence_class": RESULT_SNAPSHOT_EVIDENCE_CLASS,
     }
 
 
 def unsatisfied(criterion: str) -> dict:
-    return {"criterion": criterion, "status": "UNSATISFIED", "evidence_digest": None}
+    return {
+        "criterion": criterion,
+        "status": "UNSATISFIED",
+        "evidence_digest": None,
+        "evidence_class": RESULT_SNAPSHOT_EVIDENCE_CLASS,
+    }
 
 
 def blocked(criterion: str) -> dict:
-    return {"criterion": criterion, "status": "BLOCKED", "evidence_digest": None}
+    return {
+        "criterion": criterion,
+        "status": "BLOCKED",
+        "evidence_digest": None,
+        "evidence_class": RESULT_SNAPSHOT_EVIDENCE_CLASS,
+    }
+
+
+def finding_payload(criterion: str, description: str) -> dict:
+    return {
+        "criterion": criterion,
+        "fingerprint": content_digest(
+            {"criterion": criterion, "description": description}
+        ),
+        "description": description,
+        "state": "OPEN",
+        "predecessor": None,
+    }
 
 
 def pass_coverage(evidence_digest: str = OUTPUT_SNAPSHOT_DIGEST) -> list[dict]:
@@ -154,8 +182,9 @@ def dispatch_verification(
     result: RecordRef,
     coverage: list[dict],
     verdict: str,
-    findings: tuple[str, ...] = (),
+    findings: tuple[dict, ...] = (),
     verifier_identity: str = VERIFIER_IDENTITY,
+    verifier_runtime_capability_profile_identity: str = VERIFIER_PROFILE_IDENTITY,
 ) -> ParsedCandidate:
     """Build a validated Verification candidate bound to ``result``."""
 
@@ -163,10 +192,13 @@ def dispatch_verification(
         {
             "contract_kind": "verification",
             "protocol_version": 1,
-            "schema_version": 1,
+            "schema_version": 2,
             "payload": {
                 "result": result.to_canonical_value(),
                 "verifier_identity": verifier_identity,
+                "verifier_runtime_capability_profile_identity": (
+                    verifier_runtime_capability_profile_identity
+                ),
                 "coverage": coverage,
                 "verdict": verdict,
                 "findings": list(findings),
@@ -583,11 +615,15 @@ class PublishM2Tests(unittest.TestCase):
         for verdict, coverage, finding in not_passed:
             with self.subTest(verdict=verdict):
                 chain = self.publish_run_through("result")
+                findings = tuple(
+                    finding_payload(criterion, f"{finding}: {criterion}")
+                    for criterion in CRITERIA
+                )
                 verification = publish(
                     self.state,
                     chain.run_id,
                     dispatch_verification(
-                        chain.result.record_ref, coverage, verdict, (finding,)
+                        chain.result.record_ref, coverage, verdict, findings
                     ),
                     chain.result.record_ref,
                     "key-verification",

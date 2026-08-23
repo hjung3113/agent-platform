@@ -5,6 +5,7 @@ import unittest
 from kernel.canonical import content_digest
 from kernel.protocol import ContractKind, RecordRef
 from kernel.protocol_v1 import (
+    RESULT_SNAPSHOT_EVIDENCE_CLASS,
     TaskV1,
     VerificationV1,
     read_verification_v1,
@@ -23,6 +24,7 @@ TASK = TaskV1(
     acceptance_criteria=("criterion one", "criterion two"),
 )
 EXPECTED = content_digest({"fixture": "expected-output"})
+VERIFIER_PROFILE_IDENTITY = content_digest({"fixture": "verifier-profile"})
 
 
 def _output_digest(seed: str) -> str:
@@ -32,7 +34,12 @@ def _output_digest(seed: str) -> str:
 class StubVerifyTest(unittest.TestCase):
     def test_pass_when_digests_match(self) -> None:
         verification = stub_verify(
-            RESULT_REF, EXPECTED, TASK, "verifier-1", EXPECTED
+            RESULT_REF,
+            EXPECTED,
+            TASK,
+            "verifier-1",
+            VERIFIER_PROFILE_IDENTITY,
+            EXPECTED,
         )
         self.assertEqual(verification.verdict, "PASS")
         self.assertEqual(verification.findings, ())
@@ -41,21 +48,43 @@ class StubVerifyTest(unittest.TestCase):
             self.assertEqual(entry.criterion, criterion)
             self.assertEqual(entry.status, "SATISFIED")
             self.assertEqual(entry.evidence_digest, EXPECTED)
+            self.assertEqual(entry.evidence_class, RESULT_SNAPSHOT_EVIDENCE_CLASS)
+        self.assertEqual(
+            verification.verifier_runtime_capability_profile_identity,
+            VERIFIER_PROFILE_IDENTITY,
+        )
 
     def test_fail_with_findings_when_digests_differ(self) -> None:
         actual = _output_digest("not-expected")
         verification = stub_verify(
-            RESULT_REF, actual, TASK, "verifier-1", EXPECTED
+            RESULT_REF,
+            actual,
+            TASK,
+            "verifier-1",
+            VERIFIER_PROFILE_IDENTITY,
+            EXPECTED,
         )
         self.assertEqual(verification.verdict, "FAIL")
         self.assertTrue(verification.findings)
         for entry in verification.coverage:
             self.assertEqual(entry.status, "UNSATISFIED")
             self.assertIsNone(entry.evidence_digest)
+            self.assertEqual(entry.evidence_class, RESULT_SNAPSHOT_EVIDENCE_CLASS)
+        self.assertEqual(
+            tuple(finding.criterion for finding in verification.findings),
+            TASK.acceptance_criteria,
+        )
+        self.assertTrue(all(finding.state == "OPEN" for finding in verification.findings))
+        self.assertTrue(all(finding.predecessor is None for finding in verification.findings))
 
     def test_binds_result_ref_and_verifier_identity(self) -> None:
         verification = stub_verify(
-            RESULT_REF, EXPECTED, TASK, "verifier-1", EXPECTED
+            RESULT_REF,
+            EXPECTED,
+            TASK,
+            "verifier-1",
+            VERIFIER_PROFILE_IDENTITY,
+            EXPECTED,
         )
         self.assertEqual(verification.result, RESULT_REF)
         self.assertEqual(verification.verifier_identity, "verifier-1")
@@ -64,14 +93,33 @@ class StubVerifyTest(unittest.TestCase):
         actual = _output_digest("not-expected")
         for output_digest in (EXPECTED, actual):
             verification = stub_verify(
-                RESULT_REF, output_digest, TASK, "verifier-1", EXPECTED
+                RESULT_REF,
+                output_digest,
+                TASK,
+                "verifier-1",
+                VERIFIER_PROFILE_IDENTITY,
+                EXPECTED,
             )
             outcome = read_verification_v1(verification.to_canonical_value())
             self.assertEqual(outcome.value, verification)
 
     def test_content_digest_deterministic(self) -> None:
-        first = stub_verify(RESULT_REF, EXPECTED, TASK, "verifier-1", EXPECTED)
-        second = stub_verify(RESULT_REF, EXPECTED, TASK, "verifier-1", EXPECTED)
+        first = stub_verify(
+            RESULT_REF,
+            EXPECTED,
+            TASK,
+            "verifier-1",
+            VERIFIER_PROFILE_IDENTITY,
+            EXPECTED,
+        )
+        second = stub_verify(
+            RESULT_REF,
+            EXPECTED,
+            TASK,
+            "verifier-1",
+            VERIFIER_PROFILE_IDENTITY,
+            EXPECTED,
+        )
         self.assertIsInstance(first, VerificationV1)
         self.assertEqual(
             verification_v1_content_digest(first),

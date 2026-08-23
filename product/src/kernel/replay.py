@@ -23,6 +23,7 @@ from typing import Any, Iterator
 from kernel.canonical import content_digest
 from kernel.protocol import RecordRef, read_candidate
 from kernel.protocol_v1 import (
+    _LegacyVerificationV1,
     AttemptPacketV1,
     ReceiptV1,
     RequestV1,
@@ -44,7 +45,7 @@ class RunState:
     last_record_id: RecordRef | None
     attempt_packet: AttemptPacketV1 | None = None
     result: ResultV1 | None = None
-    verification: VerificationV1 | None = None
+    verification: VerificationV1 | _LegacyVerificationV1 | None = None
     receipt: ReceiptV1 | None = None
 
     @property
@@ -111,7 +112,7 @@ def replay(state_dir: str, run_id: str) -> RunState:
     last_record_id: RecordRef | None = None
     attempt_packet: AttemptPacketV1 | None = None
     result_value: ResultV1 | None = None
-    verification: VerificationV1 | None = None
+    verification: VerificationV1 | _LegacyVerificationV1 | None = None
     receipt: ReceiptV1 | None = None
 
     if not run_dir.is_dir():
@@ -167,7 +168,7 @@ def replay(state_dir: str, run_id: str) -> RunState:
             attempt_packet = value
         elif isinstance(value, ResultV1):
             result_value = value
-        elif isinstance(value, VerificationV1):
+        elif isinstance(value, (VerificationV1, _LegacyVerificationV1)):
             verification = value
         elif isinstance(value, ReceiptV1):
             receipt = value

@@ -402,7 +402,7 @@ def execute(
         attempt=attempt_ref,
         output_snapshot_digest=output_snapshot_digest,
         observation=RuntimeObservationV1(
-            runtime_identity=profile.runtime,
+            runtime_identity=profile.identity,
             output_snapshot_digest=output_snapshot_digest,
         ),
     )

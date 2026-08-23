@@ -13,8 +13,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from kernel.canonical import content_digest
 from kernel.lineage_store import HeadProjection, open_run
 from kernel.protocol import ParsedCandidate, RecordRef, read_candidate
+from kernel.protocol_v1 import RESULT_SNAPSHOT_EVIDENCE_CLASS
 from kernel.publish import (
     Published,
     PublishRejectionCode,
@@ -22,6 +24,9 @@ from kernel.publish import (
     publish,
 )
 from kernel.replay import RunState, replay
+
+RUNTIME_PROFILE_IDENTITY = content_digest({"fixture": "runtime-profile-fault"})
+VERIFIER_PROFILE_IDENTITY = content_digest({"fixture": "verifier-profile-fault"})
 
 
 def dispatch_request(
@@ -85,7 +90,7 @@ def dispatch_attempt(
                 "implementer_identity": "implementer-1",
                 "context_digest": "fixture-context",
                 "workspace_snapshot_digest": "fixture-workspace",
-                "runtime_capability_profile_identity": "fixture-runtime",
+                "runtime_capability_profile_identity": RUNTIME_PROFILE_IDENTITY,
             },
         }
     )
@@ -96,6 +101,7 @@ def dispatch_attempt(
 def dispatch_result(
     attempt: RecordRef,
     output_snapshot_digest: str = "sha256:agent-platform-json-v1:" + "e" * 64,
+    runtime_identity: str = RUNTIME_PROFILE_IDENTITY,
 ) -> ParsedCandidate:
     """Build a validated Result candidate bound to ``attempt``."""
 
@@ -108,7 +114,7 @@ def dispatch_result(
                 "attempt": attempt.to_canonical_value(),
                 "output_snapshot_digest": output_snapshot_digest,
                 "observation": {
-                    "runtime_identity": "runtime-m2",
+                    "runtime_identity": runtime_identity,
                     "output_snapshot_digest": output_snapshot_digest,
                 },
             },
@@ -129,15 +135,17 @@ def dispatch_verification(
         {
             "contract_kind": "verification",
             "protocol_version": 1,
-            "schema_version": 1,
+            "schema_version": 2,
             "payload": {
                 "result": result.to_canonical_value(),
                 "verifier_identity": "verifier-1",
+                "verifier_runtime_capability_profile_identity": VERIFIER_PROFILE_IDENTITY,
                 "coverage": [
                     {
                         "criterion": criterion,
                         "status": "SATISFIED",
                         "evidence_digest": evidence_digest,
+                        "evidence_class": RESULT_SNAPSHOT_EVIDENCE_CLASS,
                     }
                     for criterion in criteria
                 ],

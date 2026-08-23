@@ -6,10 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kernel.protocol import ParsedCandidate, RecordRef, read_candidate
+from kernel.protocol import ContractKind, ParsedCandidate, RecordRef, read_candidate
 from kernel.protocol_v1 import (
     PROTOCOL_VERSION,
-    SCHEMA_VERSION,
     AttemptPacketV1,
     ReceiptV1,
     RequestV1,
@@ -17,6 +16,7 @@ from kernel.protocol_v1 import (
     TaskV1,
     VerificationV1,
     WorkflowRevisionV1,
+    schema_version_for_kind,
 )
 from kernel.publish import Published, Rejected, publish
 
@@ -24,6 +24,7 @@ from execution import host
 from execution.attempt import build_attempt_packet, build_receipt
 from execution.context_compiler import compile_context_pack, disclosure_identity
 from execution.context_evidence import write_context_evidence
+from execution.opencode_adapter import probe_opencode_profile
 from verification.stub_verifier import stub_verify
 
 
@@ -77,7 +78,7 @@ def _as_candidate(contract_kind: str, typed: Any) -> ParsedCandidate:
         {
             "contract_kind": contract_kind,
             "protocol_version": PROTOCOL_VERSION,
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": schema_version_for_kind(ContractKind(contract_kind)),
             "payload": typed.to_canonical_value(),
         }
     )
@@ -225,11 +226,13 @@ def run_one_task(
         ),
     )
 
+    verifier_profile = probe_opencode_profile(opencode_binary_path, config_paths)
     verification_value = stub_verify(
         result_ref=result_published.record_ref,
         result_output_snapshot_digest=result_value.output_snapshot_digest,
         task=task,
         verifier_identity=verifier_identity,
+        verifier_runtime_capability_profile_identity=verifier_profile.identity,
         expected_output_digest=expected_output_digest,
     )
     verification_published = _require_published(

@@ -253,7 +253,10 @@ class HostExecuteTest(unittest.TestCase):
             )
 
         self.assertEqual(result.attempt, attempt_ref)
-        self.assertTrue(result.observation.runtime_identity.startswith(f"opencode@{FAKE_VERSION}+"))
+        self.assertEqual(
+            result.observation.runtime_identity,
+            attempt.runtime_capability_profile_identity,
+        )
         self.assertEqual(
             result.output_snapshot_digest,
             snapshot_identity(self.root, declared).digest,
