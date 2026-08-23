@@ -1,6 +1,38 @@
 # Handoff
 
-## Completed in this slice (M4 — deterministic Context Compiler, merged)
+## Completed in this slice (M5 — cross-project failure-mode ledger, research/docs only)
+
+M5 done per [`mvp-implementation-roadmap.md`](docs/plans/active/mvp-implementation-roadmap.md)'s
+M5 section, tracking [Issue #46](https://github.com/hjung3113/agent-platform/issues/46).
+Research/documentation only — no plan doc, no adversarial review round, no code.
+
+- **Method**: dispatched `codex --model gpt-5.6-luna -c model_reasoning_effort="xhigh"
+  --sandbox read-only` in 5 parallel Orca worktrees (one per sibling repo), each doing a
+  cheap `git log --all` keyword pass first (fix/bug/regression/revert/hotfix/crash/race/
+  leak/deadlock/security/incident/broke/failed), then deep-reading only flagged commit
+  diffs/PR bodies for real root cause + actual fix. Orchestrator (main session) polled via
+  Monitor until all 5 confirmed idle, read back full scrollback per terminal, then removed
+  all 5 scratch worktrees (verified clean, no changes) after extraction.
+- **Deliverable**: new [`docs/research/failure-mode-ledger.md`](docs/research/failure-mode-ledger.md),
+  separate from `adoption-ledger.md` (design-pattern adoption, not failure records).
+- **Coverage**: all 4 mining-scope repos scanned — `opencode-orchestrated-agent-workflow`
+  (147 commits, 17 records), `agent-migration-pipeline` (175 commits, 5 records),
+  `general-low-reasoning-agent-harness` (746 commits, 30 records), `thin-agent-harness`
+  (8 commits, 2 records) — plus `meta-prompting-skill` applicability-only paragraph (per
+  roadmap, conceptual repo not a failure-mining target). GitHub issue/PR API was unavailable
+  in the sandboxed recon environment for 3 of 4 repos; local PR refs/commit bodies used
+  instead where flagged.
+- **M6-relevant findings tagged directly in the ledger** (fold into M6's adversarial review
+  checklist before M6 design starts, per the roadmap's M5→M6 gate): circular approval-digest
+  self-reference (thin-agent-harness `b9b9460`/PR #2), receipt `entry_hash` vs
+  `after_sha256` field mismatch making clean lifecycles fail (`general-low-reasoning-agent-
+  harness f7d1081`), admission-proof idempotency via racy JSON read-modify-write plus
+  unsigned nonce files (`8f1e465`/`dc8cf31`), advanced state accepted with absent/empty/
+  telemetry-only audit evidence (`c8f4789`, `ed08df9`/`d2e6159`), verification existing in
+  tests but missing from production paths (`d671ba9`), and dangling-reference/stale-write
+  acceptance in durable-state checks (agent-migration-pipeline PR #57).
+
+## Completed earlier (M4 — deterministic Context Compiler, merged)
 
 M4 implemented, reviewed twice, and merged: [PR #47](https://github.com/hjung3113/agent-platform/pull/47)
 (squash-merged to `main` as `907c007`), per
@@ -84,43 +116,19 @@ python3.12 -m compileall -q product/src product/tests                           
 - M1 — Kernel authoritative publication and replay spine, PR #41. See prior handoff commits
   for full detail if needed.
 
-## Next session — fixed scope: M5, cross-project failure-mode ledger
+## Next session — fixed scope: M6 design, verification/evidence hardening (issue #5)
 
-Per [`mvp-implementation-roadmap.md`](docs/plans/active/mvp-implementation-roadmap.md)'s M5
-section, tracking [Issue #46](https://github.com/hjung3113/agent-platform/issues/46). This
-milestone is **research/documentation, not code** — no plan doc, no adversarial review round,
-no implementation DAG. Goal: mine sibling repositories' own git history/issues/PRs for
-concrete failure/regression/bug records (not design-pattern adoption, which
-`docs/research/adoption-ledger.md` already covers) so M6's adversarial review starts from
-real prior failures instead of rediscovering them from scratch.
+M5's gate is satisfied: [`docs/research/failure-mode-ledger.md`](docs/research/failure-mode-ledger.md)
+exists with all 4 mining-scope repos scanned. **First action next session**: fold the
+ledger's M6-tagged findings (listed above under "M5-relevant findings") into M6's
+adversarial-review checklist before any M6 design work — this was the explicit condition for
+starting M6, not yet done.
 
-**Method** (per roadmap, follow exactly, do not gold-plate):
-
-1. Scan git log/issues/PRs per repo for failure/regression/bug records first — titles/commit
-   messages/labels only, cheap pass.
-2. For flagged items only, read the actual PR body/diff to extract root cause and the actual
-   fix/improvement applied.
-3. Record: source repo + commit/PR reference, failure mode, their fix, applicability to
-   agent-platform (which module/future milestone), status.
-
-**Scope:**
-
-- Full failure-mode mining: `opencode-orchestrated-agent-workflow`,
-  `agent-migration-pipeline`, `general-low-reasoning-agent-harness`, `thin-agent-harness`.
-- Applicability-only scan (conceptual repo, not a failure-mining target):
-  `meta-prompting-skill` — record current-project applicability only, not failure modes.
-
-**Deliverable:** new `docs/research/failure-mode-ledger.md`, separate from
-`adoption-ledger.md`.
-
-**Exit evidence:**
-
-- each of the 4 mining-scope repos shows scan evidence (git log/issue/PR pass completed)
-- `meta-prompting-skill` applicability note recorded
-- findings folded into M6's adversarial review checklist before M6 design starts
-
-M5 gates M6 — do not start M6 (verification hardening, primary issue #5) design until this
-ledger exists and its findings are folded into M6's adversarial review checklist.
+M6 itself, per the roadmap: hardened criterion/evidence policy, execution-provenance
+independence, self-verification closed by real distinct identity rather than M2's string
+inequality. M3's real Result/Runtime Observation binding and M4's real Context Pack make this
+possible but do not implement it. Expect a plan doc + adversarial review round + implementation
+DAG, following the M3/M4 pattern.
 
 ## Explicit scope limits carried forward from M3/M4 (not gaps to silently close later)
 
@@ -183,7 +191,7 @@ when a concrete milestone need makes one of these load-bearing:
   (M6 — hardened criterion/evidence policy, execution-provenance independence,
   self-verification closed by real distinct identity rather than M2's string inequality).
   M3's real Result/Runtime Observation binding and M4's real Context Pack make this possible
-  but do not implement it. M5 (next session) gates M6's design.
+  but do not implement it. M5's failure-mode ledger is done; next session starts M6.
 - #4 deterministic orchestration after replay/authoritative state is stable (M7 — retry/
   repair/replan, fan-in, safe parallelism, multi-task DAG, Reviewer/Verifier split per
   ADR-0009; also where M3's per-task capability-requirement gap above likely gets closed;
