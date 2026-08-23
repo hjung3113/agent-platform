@@ -22,15 +22,20 @@ Research/documentation only — no plan doc, no adversarial review round, no cod
   roadmap, conceptual repo not a failure-mining target). GitHub issue/PR API was unavailable
   in the sandboxed recon environment for 3 of 4 repos; local PR refs/commit bodies used
   instead where flagged.
-- **M6-relevant findings tagged directly in the ledger** (fold into M6's adversarial review
-  checklist before M6 design starts, per the roadmap's M5→M6 gate): circular approval-digest
-  self-reference (thin-agent-harness `b9b9460`/PR #2), receipt `entry_hash` vs
-  `after_sha256` field mismatch making clean lifecycles fail (`general-low-reasoning-agent-
-  harness f7d1081`), admission-proof idempotency via racy JSON read-modify-write plus
-  unsigned nonce files (`8f1e465`/`dc8cf31`), advanced state accepted with absent/empty/
-  telemetry-only audit evidence (`c8f4789`, `ed08df9`/`d2e6159`), verification existing in
-  tests but missing from production paths (`d671ba9`), and dangling-reference/stale-write
-  acceptance in durable-state checks (agent-migration-pipeline PR #57).
+- **M6-relevant findings folded into M6's adversarial review checklist**: posted as
+  [issue #5 comment](https://github.com/hjung3113/agent-platform/issues/5#issuecomment-5386949987) —
+  all 8 records tagged "directly relevant to M6" in the ledger, each restated as a concrete
+  adversarial question with source record and their fix: semantically-forged-but-digest-valid
+  provenance (`opencode-orchestrated-agent-workflow` 3f77019 et al.), dangling-reference/
+  stale-concurrent-write acceptance (`agent-migration-pipeline` PR #57), racy admission-proof
+  idempotency + unsigned nonce evidence (`general-low-reasoning-agent-harness`
+  8f1e465/dc8cf31), fail-closed checks wrongly rejecting legitimate rotated/lagged evidence
+  (`ed08df9`/`d2e6159`), absent/empty/telemetry-only evidence accepted as fresh state
+  (`c8f4789`), verification wired into tests but not the production path (`d671ba9`),
+  mismatched-field false rejection masking a real integrity check (`f7d1081`), circular
+  approval-digest self-reference and ambiguous record ownership (`thin-agent-harness`
+  `b9b9460`/PR #2). **M5→M6 gate now fully satisfied** — this was the last precondition
+  before M6 design.
 
 ## Completed earlier (M4 — deterministic Context Compiler, merged)
 
@@ -118,17 +123,23 @@ python3.12 -m compileall -q product/src product/tests                           
 
 ## Next session — fixed scope: M6 design, verification/evidence hardening (issue #5)
 
-M5's gate is satisfied: [`docs/research/failure-mode-ledger.md`](docs/research/failure-mode-ledger.md)
-exists with all 4 mining-scope repos scanned. **First action next session**: fold the
-ledger's M6-tagged findings (listed above under "M5-relevant findings") into M6's
-adversarial-review checklist before any M6 design work — this was the explicit condition for
-starting M6, not yet done.
+M5→M6 gate fully satisfied (ledger exists, all 4 repos scanned, M6-tagged findings folded
+into [issue #5](https://github.com/hjung3113/agent-platform/issues/5)'s checklist as 8
+concrete adversarial questions). Nothing blocks M6 design start.
 
 M6 itself, per the roadmap: hardened criterion/evidence policy, execution-provenance
 independence, self-verification closed by real distinct identity rather than M2's string
 inequality. M3's real Result/Runtime Observation binding and M4's real Context Pack make this
 possible but do not implement it. Expect a plan doc + adversarial review round + implementation
-DAG, following the M3/M4 pattern.
+DAG, following the M3/M4 pattern (`docs/plans/active/m4-deterministic-context-compiler.md` is
+the most recent, most detailed precedent to imitate — full source/scope/exit-gate/review-log
+structure). **First action next session**: write
+`docs/plans/active/m6-verification-evidence-hardening.md` from the roadmap's M6 section +
+issue #5's full checklist (base questions + the 8 folded ledger findings) + the actual M2/M3/M4
+code on `main` (`kernel/protocol_v1.py`'s `VerificationV1`, whatever currently closes
+self-verification via string inequality, `kernel/lineage_store.py`, `execution/host.py`,
+`execution/context_compiler.py`) — do not start from a blank design, ground every section in
+what the code actually does today, same discipline as M3/M4 §1.
 
 ## Explicit scope limits carried forward from M3/M4 (not gaps to silently close later)
 
