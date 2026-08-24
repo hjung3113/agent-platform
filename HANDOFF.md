@@ -1,10 +1,11 @@
 # Handoff
 
-## Completed in this slice (M6 — verification/evidence hardening, PR open)
+## Completed earlier this milestone (M6 — verification/evidence hardening, merged)
 
-M6 implemented per [`docs/plans/active/m6-verification-evidence-hardening.md`](docs/plans/active/m6-verification-evidence-hardening.md),
-tracking [Issue #5](https://github.com/hjung3113/agent-platform/issues/5). **PR not yet
-merged**: [PR #48](https://github.com/hjung3113/agent-platform/pull/48).
+M6 implemented and merged: [PR #48](https://github.com/hjung3113/agent-platform/pull/48)
+(squash-merged to `main`), per
+[`docs/plans/active/m6-verification-evidence-hardening.md`](docs/plans/active/m6-verification-evidence-hardening.md),
+tracking [Issue #5](https://github.com/hjung3113/agent-platform/issues/5).
 
 - **Plan**: drafted grounded in the real M2–M4 code (not the roadmap's general vocabulary),
   folding in the 8 M6-tagged findings from the M5 ledger (issue #5 comment 5386949987, worked
@@ -43,12 +44,29 @@ merged**: [PR #48](https://github.com/hjung3113/agent-platform/pull/48).
   Landed as `bab23bb`, 351 tests green (contracts 143, kernel 109, execution 92, verification
   7) + `compileall`, independently re-verified outside the worktree, diff spot-checked against
   the corrected design. Pushed to PR #48; PR comment posted explaining the round-2 fix.
-- **Not yet done**: PR #48 merge. Both automated-review rounds (chatgpt-codex-connector on the
-  real diff) are now addressed; no manual `glm-5.3`-style second pass has been run against the
-  final `bab23bb` diff specifically (round 1's `glm-5.3` review was pre-implementation, against
-  the plan doc only). Next session: check PR #48 for any further review activity, decide
-  whether a manual pass against the final diff is still warranted given two real automated
-  rounds already passed, then merge.
+- **Round 3 (manual second-pass review against the final `bab23bb` diff, this same slice):**
+  ran the M3/M4-style manual second review round — `glm-5.3` (effort `high`, via `opencode`,
+  `--auto`) against `git diff main...bab23bb`, the governing spec, and the plan doc, with 4
+  adversarial probes run directly against the real publish boundary. Found **0 BLOCKER, 2
+  HIGH, 3 MEDIUM, 4 LOW**: HIGH 1 — publishing a schema-1 candidate crashed the Kernel
+  boundary with an unhandled `AttributeError` instead of a typed `Rejected` (reproduced);
+  fixed with a schema-freshness gate in `publish.py` (new
+  `PublishRejectionCode.STALE_SCHEMA_VERSION`). HIGH 2 — round-1-committed schema-2
+  Verifications became unreplayable after round 2 reused their dispatch key (reproduced:
+  `malformed_payload: verification_payload_keys_missing=['verifier_execution_identity']`);
+  fixed by bumping `VERIFICATION_SCHEMA_VERSION` to 3 and retaining the round-1 shape as a
+  legacy reader at the freed `(VERIFICATION, 1, 2)` slot. MEDIUM 1 closed by the HIGH 1 fix
+  (same root cause — a v1 RESULT candidate previously committed a dead-end record). MEDIUM
+  2/3 and the 4 LOWs were plan-doc overclaim corrections (the execution-identity nonce's
+  actual evidentiary strength) and verifier-subprocess robustness (`PYTHONPATH` resolution,
+  stderr capture) — full detail in the plan doc's §14 "Round 2 manual review" subsection.
+  Dispatched fix implementation to `codex --model gpt-5.6-luna -c
+  model_reasoning_effort="max"` in the same worktree; landed as `36e6bc7`, 357 tests green
+  (contracts 146, kernel 111, execution 93, verification 7, up from 351) + `compileall`,
+  independently re-verified outside the worktree, diff spot-checked against both HIGH fixes
+  — matches exactly. Pushed to PR #48; PR comment posted explaining round 3.
+- **Merged**: PR #48 squash-merged to `main` after user confirmation (repo has no CI configured
+  to wait on — `gh pr checks` reports none). Worktree and local feature branch cleaned up.
 
 ## Completed earlier (M5 — cross-project failure-mode ledger, research/docs only)
 
@@ -171,19 +189,18 @@ python3.12 -m compileall -q product/src product/tests                           
 - M1 — Kernel authoritative publication and replay spine, PR #41. See prior handoff commits
   for full detail if needed.
 
-## Next session — fixed scope: review and merge PR #48 (M6)
+## Next session — start M7 (orchestration expansion)
 
-M6 is designed and implemented (see above); [PR #48](https://github.com/hjung3113/agent-platform/pull/48)
-is open, not merged, and has not had a post-implementation adversarial review round yet — M3
-and M4 both had two review rounds (pre-implementation plan review, then a second pass against
-the real committed diff), and M6 has only had the first so far. **First action next session**:
-run a second review round against PR #48's actual diff (not the plan doc) — same process as
-M3 §14/M4 §14 — before merging, and fold any findings into the plan doc's §14 (create it,
-mirroring M4's §14 stub) and fix them in the PR. Once merged, next scope is M7 (orchestration
-expansion — retry/repair/replan, fan-in, safe parallelism, multi-task DAG, Reviewer/Verifier
-split per ADR-0009), which several of M6's explicit scope limits (plan §11 — genuine
-verifier-environment independence, cross-run Finding lifecycle, stale/flaky/retry evidence)
-are deferred to.
+M6 is fully done: designed, implemented, reviewed three rounds (pre-implementation manual,
+post-implementation automated, post-implementation manual), all findings fixed, merged to
+`main`. Next scope is M7 (orchestration expansion — retry/repair/replan, fan-in, safe
+parallelism, multi-task DAG, Reviewer/Verifier split per ADR-0009), which several of M6's
+explicit scope limits (plan §11 — genuine verifier-environment independence, cross-run
+Finding lifecycle, stale/flaky/retry evidence) are deferred to, and where M3's per-task
+capability-requirement gap (below) likely gets closed. Start with the same pattern M3–M6
+used: draft a plan grounded in the real committed code (not the roadmap's general
+vocabulary), run a pre-implementation adversarial review round before dispatching
+implementation.
 
 ## Explicit scope limits carried forward from M3/M4 (not gaps to silently close later)
 
@@ -242,11 +259,9 @@ when a concrete milestone need makes one of these load-bearing:
 
 ### Later milestones (unchanged from M0/M1/M2/M3 handoff)
 
-- #5 verification/evidence soundness after authoritative lineage/snapshot bindings exist
-  (M6 — hardened criterion/evidence policy, execution-provenance independence,
-  self-verification closed by real distinct identity rather than M2's string inequality).
-  M3's real Result/Runtime Observation binding and M4's real Context Pack make this possible
-  but do not implement it. M5's failure-mode ledger is done; next session starts M6.
+- #5 verification/evidence soundness — **done, M6 merged** (hardened criterion/evidence
+  policy, execution-provenance independence, self-verification closed by real distinct
+  process identity rather than M2's string inequality).
 - #4 deterministic orchestration after replay/authoritative state is stable (M7 — retry/
   repair/replan, fan-in, safe parallelism, multi-task DAG, Reviewer/Verifier split per
   ADR-0009; also where M3's per-task capability-requirement gap above likely gets closed;
