@@ -385,20 +385,29 @@ real separation:
 
 1. **A real per-spawn execution nonce on the implementer side.** `RuntimeObservationV1` gains
    `execution_identity: str` — generated inside `host.execute()` at/after the actual
-   `subprocess.run` spawn (not deterministic, not derived from `profile.identity`):
-   `content_digest({"pid": <child pid>, "spawned_at_ns": time.time_ns(), "nonce":
-   os.urandom(16).hex()})`. This is real evidence that *this specific spawn* happened — a
-   value nothing outside that spawn could produce in advance. `ResultV1`/`RuntimeObservationV1`
-   is a schema change requiring the same legacy-retention treatment `VerificationV1` already
-   got in round 1 (§10 step 1's `schema_version_for_kind` pattern, reused, not reinvented —
-   `RESULT` moves to schema v2 with a retained v1 legacy reader for replay).
+   `subprocess.run` spawn (not deterministic, not derived from `profile.identity`).
+   **Canonical-JSON-safe payload (round-2 correction, found by the implementing agent stopping
+   correctly rather than silently deviating — see §14's second entry):** `kernel/canonical.py`'s
+   canonicalizer rejects integers outside ±2⁵³ (`canonical.py:56`), and `time.time_ns()` is
+   nanosecond-epoch — routinely far outside that range. All numeric-looking nonce components
+   are strings: `content_digest({"spawned_at_ns": str(time.time_ns()), "nonce":
+   os.urandom(16).hex()})`. **No PID field** — `subprocess.run()` is a blocking wrapper that
+   does not expose the child PID at the call site without switching to `subprocess.Popen`
+   (extra machinery for zero real benefit: `os.urandom(16)` already supplies 128 bits of
+   entropy, which is the actual property this nonce needs — uniqueness/unforgeability from
+   outside the spawn — not a process-accounting identifier). This is real evidence that *this
+   specific spawn* happened — a value nothing outside that spawn could produce in advance.
+   `ResultV1`/`RuntimeObservationV1` is a schema change requiring the same legacy-retention
+   treatment `VerificationV1` already got in round 1 (§10 step 1's `schema_version_for_kind`
+   pattern, reused, not reinvented — `RESULT` moves to schema v2 with a retained v1 legacy
+   reader for replay).
 2. **A genuinely separate verifier process.** New `verification/stub_verifier_cli.py` — a
    small `__main__`-style entrypoint that: reads its verification inputs (result ref, output
    digests, task, identities) from argv/stdin as JSON, independently calls
    `probe_opencode_profile` (still real, still reused, its determinism no longer matters here
-   — see below), generates its **own** real per-invocation nonce the same way
-   (`content_digest({"pid": os.getpid(), "started_at_ns": time.time_ns(), "nonce":
-   os.urandom(16).hex()})`), calls `stub_verify(...)` with that nonce as a new
+   — see below), generates its **own** real per-invocation nonce the same canonical-safe way
+   (`content_digest({"started_at_ns": str(time.time_ns()), "nonce": os.urandom(16).hex()})`,
+   no PID, same reasoning as above), calls `stub_verify(...)` with that nonce as a new
    `verifier_execution_identity` argument, and writes the resulting `VerificationV1`'s
    canonical JSON to stdout. `run_one_task.py` invokes it via `subprocess.run([sys.executable,
    "-m", "verification.stub_verifier_cli", ...], capture_output=True, check=True, text=True)`
@@ -863,3 +872,16 @@ committed diff. One finding, confirmed and corrected before merge:
   implementation order in §10; round-2 test additions in §9. Not yet implemented — round 1's
   committed code (`93acbab`) still has the round-1 retraction; round 2 is a follow-up commit
   on the same PR #48 branch.
+
+- **Round-2 mid-implementation correction (caught by the implementing agent stopping and
+  reporting instead of silently deviating — exactly the behavior asked for):** §6's nonce
+  payload as first drafted, `content_digest({"pid": ..., "spawned_at_ns": time.time_ns(),
+  ...})`, is unimplementable — `kernel/canonical.py`'s canonicalizer rejects integers outside
+  ±2⁵³ (`canonical.py:56`) and `time.time_ns()` is nanosecond-epoch, routinely far outside that
+  range; the real Host path failed at the first call. Separately, `subprocess.run()` (used at
+  both the Host spawn site and the planned verifier-CLI invocation) does not expose a child PID
+  without switching to `subprocess.Popen`. Corrected in §6/§10 (this revision): all
+  numeric-looking nonce components are stringified (`str(time.time_ns())`), and the PID field
+  is dropped entirely — `os.urandom(16)`'s 128 bits already supply the real property the nonce
+  needs (unforgeable uniqueness), and a PID was never load-bearing for that. No design
+  intent changed, only the concrete payload shape.
