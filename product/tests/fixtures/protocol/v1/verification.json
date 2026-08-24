@@ -1,7 +1,7 @@
 {
   "contract_kind": "verification",
   "protocol_version": 1,
-  "schema_version": 2,
+  "schema_version": 3,
   "payload": {
     "result": {
       "contract_kind": "result",

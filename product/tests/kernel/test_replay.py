@@ -131,7 +131,7 @@ def dispatch_verification(
         {
             "contract_kind": "verification",
             "protocol_version": 1,
-            "schema_version": 2,
+            "schema_version": 3,
             "payload": {
                 "result": result.to_canonical_value(),
                 "verifier_identity": "verifier-1",
@@ -474,6 +474,77 @@ class ReplayTests(unittest.TestCase):
         assert state.result is not None
         self.assertFalse(hasattr(state.result.observation, "execution_identity"))
         self.assertEqual(state.result.observation.runtime_identity, RUNTIME_PROFILE_IDENTITY)
+
+    def test_round_one_v2_verification_record_replays_after_verification_schema_bump(
+        self,
+    ) -> None:
+        genesis = publish(self.state, None, dispatch_request(), None, "key-1")
+        self.assertIsInstance(genesis, Published)
+        workflow = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_workflow(genesis.record_ref),
+            genesis.record_ref,
+            "key-2",
+        )
+        self.assertIsInstance(workflow, Published)
+        attempt = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_attempt(workflow.record_ref),
+            workflow.record_ref,
+            "key-3",
+        )
+        self.assertIsInstance(attempt, Published)
+        result = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_result(attempt.record_ref),
+            attempt.record_ref,
+            "key-4",
+        )
+        self.assertIsInstance(result, Published)
+
+        candidate = {
+            "contract_kind": "verification",
+            "protocol_version": 1,
+            "schema_version": 2,
+            "payload": {
+                "result": result.record_ref.to_canonical_value(),
+                "verifier_identity": "round-one-verifier",
+                "verifier_runtime_capability_profile_identity": VERIFIER_PROFILE_IDENTITY,
+                "coverage": [
+                    {
+                        "criterion": "Replay is deterministic",
+                        "status": "SATISFIED",
+                        "evidence_digest": OUTPUT_SNAPSHOT_DIGEST,
+                        "evidence_class": RESULT_SNAPSHOT_EVIDENCE_CLASS,
+                    }
+                ],
+                "verdict": "PASS",
+                "findings": [],
+            },
+        }
+        sequence = 5
+        record_id = f"{genesis.run_id}:{sequence:010d}"
+        record = {
+            "run_id": genesis.run_id,
+            "sequence": sequence,
+            "record_id": record_id,
+            "content_digest": content_digest(candidate),
+            "idempotency_key": "round-one-verification-fixture",
+            "candidate": candidate,
+        }
+        run_dir = Path(self.state) / "runs" / genesis.run_id
+        (run_dir / f"{sequence:010d}.json").write_bytes(canonical_json_bytes(record))
+
+        state = replay(self.state, genesis.run_id)
+        self.assertEqual(state.last_sequence, 5)
+        self.assertIsNotNone(state.verification)
+        assert state.verification is not None
+        self.assertEqual(state.verification.verdict, "PASS")
+        self.assertEqual(state.verification.coverage[0].evidence_class, RESULT_SNAPSHOT_EVIDENCE_CLASS)
+        self.assertFalse(hasattr(state.verification, "verifier_execution_identity"))
 
     def test_fail_terminated_five_record_run_is_not_terminal(self) -> None:
         genesis = publish(self.state, None, dispatch_request(), None, "key-1")

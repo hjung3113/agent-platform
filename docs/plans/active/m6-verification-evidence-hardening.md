@@ -394,9 +394,10 @@ real separation:
    os.urandom(16).hex()})`. **No PID field** — `subprocess.run()` is a blocking wrapper that
    does not expose the child PID at the call site without switching to `subprocess.Popen`
    (extra machinery for zero real benefit: `os.urandom(16)` already supplies 128 bits of
-   entropy, which is the actual property this nonce needs — uniqueness/unforgeability from
-   outside the spawn — not a process-accounting identifier). This is real evidence that *this
-   specific spawn* happened — a value nothing outside that spawn could produce in advance.
+   entropy, which is the actual property this nonce needs — uniqueness from the honest
+   producer path, not a process-accounting identifier). This records a per-spawn identity from
+   that path; it does not independently prove to a caller that a specific spawn happened or
+   make a caller-supplied identity unforgeable.
    `ResultV1`/`RuntimeObservationV1` is a schema change requiring the same legacy-retention
    treatment `VerificationV1` already got in round 1 (§10 step 1's `schema_version_for_kind`
    pattern, reused, not reinvented — `RESULT` moves to schema v2 with a retained v1 legacy
@@ -426,10 +427,10 @@ real separation:
    `SELF_VERIFICATION_REJECTED` (same code as the existing identity check — same defect
    class: an execution claiming independence that isn't). Two independently-generated,
    genuinely-random 128-bit nonces from two separate OS processes collide with cryptographically
-   negligible probability when the path is honest; the check exists to catch the dishonest
-   path — a caller skipping the real subprocess spawn and fabricating both values from the
-   same process — which is exactly what a mutation-suite fixture (§9) constructs directly to
-   prove the check fires.
+   negligible probability when separate OS processes follow the honest path; the check enforces
+   inequality of the two recorded identities and catches direct value reuse. It does not detect
+   fabrication of two distinct values or independently prove child contribution or that a spawn
+   occurred, which is exactly why the mutation-suite fixture (§9) is limited to the reuse case.
 
 **What this still does not, and cannot, prove (stated honestly, same discipline as before):**
 that the *verifier subprocess's own binary* is uncompromised or that its `stub_verify` logic
@@ -456,6 +457,11 @@ rule (§5.1), and the environment-binding check (§5.2) all run *before* a Verif
 `verdict == "PASS"` can exist at all. Receipt admission's existing `verdict != "PASS"` check
 is sufficient once what it trusts is actually hardened upstream.
 
+The additive-bump behavior is explicit: an in-flight pre-M6 run with a committed schema-v1
+`PASS` Verification may complete to a Receipt after upgrade. That `PASS` was already the
+authoritative admissibility signal when the Verification committed, and M6 does not
+retroactively invalidate it; post-upgrade Receipt publication accepts the existing result.
+
 ## 8. Stale/flaky/retry evidence: already structurally guaranteed, not new machinery
 
 Verified against the real code: `_NEXT_KIND` (`publish.py:62–69`) is a strict single-successor
@@ -473,7 +479,7 @@ in §11, not silently dropped.
 
 ## 9. Test plan
 
-### Protocol/reader (`product/tests/contracts/test_protocol_v1.py`, extended)
+### Protocol/reader (`product/tests/contracts/test_protocol_v1_m2.py`, extended)
 
 - `FindingV1` reader: exact-keys enforcement, `state` must be one of `_FINDING_STATES`,
   `fingerprint` must be a valid content digest matching `content_digest({"criterion":...,
@@ -497,16 +503,16 @@ in §11, not silently dropped.
   schema-v1 `ResultV1` still replays after the bump, mirroring the `VERIFICATION` one above
 - golden-digest fixtures regenerated for the new `VerificationV1` wire shape
   (`product/tests/fixtures/protocol/v1/verification.json`, `golden-digests.json`)
-- schema-version dispatch: a `VERIFICATION` candidate declaring the new `schema_version=2`
-  shape with a stale-shaped payload (e.g. old-format `findings` as bare strings) is rejected
-  `MALFORMED_PAYLOAD`; a candidate correctly declaring `schema_version=1` in the **retained
-  legacy shape** (§10 step 1) still parses — proving the bump is additive, not a silent
-  history break — and a `schema_version=1` candidate carrying the *new* v2 fields is rejected
-  `UNSUPPORTED_SCHEMA_VERSION` (the real code name, `protocol.py:72`, `:365–370` — not
+- schema-version dispatch: a `VERIFICATION` candidate declaring the current
+  `schema_version=3` shape with a stale-shaped payload (e.g. old-format `findings` as bare
+  strings) is rejected `MALFORMED_PAYLOAD`; a candidate correctly declaring the retained
+  round-one `schema_version=2` shape (§10 step 1) still parses — proving the bump is additive,
+  not a silent history break — and a `schema_version=1` candidate carrying the *new* round-two
+  fields is rejected `UNSUPPORTED_SCHEMA_VERSION` (the real code name, `protocol.py:72`, `:365–370` — not
   `UNKNOWN_SCHEMA_VERSION`, which appears nowhere in this codebase)
-- **replay fixture (closing HIGH 2):** a run containing a committed `schema_version=1`
-  Verification (constructed against the legacy shape) still replays cleanly after the v2 bump
-  — proves the retained legacy reader keeps `replay.py`'s integrity check
+- **replay fixture (closing HIGH 2):** a run containing a committed round-one
+  `schema_version=2` Verification (constructed against the legacy round-one shape) still
+  replays cleanly after the v3 bump — proves the retained legacy reader keeps `replay.py`'s integrity check
   (`replay.py:97–99,155–160`) and `_committed_contract`'s re-parse both working against
   pre-M6 history
 
@@ -736,13 +742,14 @@ findings rather than the original draft's declared-but-unimplemented claims:
   corrected `host.py` producer — this is the check that would have been unshippable without
   BLOCKER 1's fix)
 - self-verification is rejected two ways: the existing `verifier_identity`/
-  `implementer_identity` string check (unchanged from M2), and — as of round 2 — a real
-  execution-identity check requiring the verifier's genuine per-spawn subprocess nonce to
-  differ from the implementer's own (§6); this satisfies
-  `docs/specs/06-review-verification-evidence.md:15`'s distinct-attempt/execution-identity
-  requirement via real process separation, not a same-process label swap. What remains
-  explicitly out of scope (§11): verifier binary/trust distinctness beyond process separation
-  (same `opencode` binary, separate process) — not claimed as closed
+  `implementer_identity` string check (unchanged from M2), and — as of round 2 — a recorded
+  execution-identity check requiring the verifier's per-invocation identity to differ from the
+  implementer's per-spawn identity (§6). The honest producer path generates those identities
+  in separate OS processes, and direct identity reuse is rejected; this proves the recorded
+  inequality and honest-path behavior, not independent proof that a spawn occurred or detection
+  of fabrication of two distinct values. What remains explicitly out of scope (§11): verifier
+  binary/trust distinctness beyond process separation (same `opencode` binary, separate
+  process) — not claimed as closed
 - an unresolved blocking Finding cannot disappear by omission **within one run's Verification
   publish**, in both directions (a non-SATISFIED criterion without a Finding, and a Finding
   attached to a SATISFIED criterion — §4.2) — the cross-run form is explicitly out of scope
@@ -837,9 +844,10 @@ the post-hardening state):
 
 ## 14. Round 2 — post-implementation PR review
 
-Round 1 was implemented (`93acbab`, [PR #48](https://github.com/hjung3113/agent-platform/pull/48),
-338 tests green) and reviewed automatically by `chatgpt-codex-connector` against the real
-committed diff. One finding, confirmed and corrected before merge:
+Round 1 was implemented (`93acbab`, [PR #48](https://github.com/hjung3113/agent-platform/pull/48));
+its recorded baseline was 338 tests green. The final round-2 review run covered 351 tests and
+was reviewed automatically by `chatgpt-codex-connector` against the real committed diff. One
+finding, confirmed and corrected before merge:
 
 - **P1** (round 1's §6 retraction of the self-verification distinctness check contradicts a
   normative spec requirement, not just an aspirational roadmap bullet).
@@ -885,3 +893,84 @@ committed diff. One finding, confirmed and corrected before merge:
   is dropped entirely — `os.urandom(16)`'s 128 bits already supply the real property the nonce
   needs (unforgeable uniqueness), and a PID was never load-bearing for that. No design
   intent changed, only the concrete payload shape.
+
+### Round 2 manual review (against the final `bab23bb` diff, not the plan doc)
+
+Reviewed by `glm-5.3` (effort `high`, via `opencode`) against the real committed diff
+(`git diff main...bab23bb`, 23 files), the governing spec, and this plan doc — the first
+manual pass to run against the *final* code rather than the plan text (round 1's manual pass
+predates implementation; the automated `chatgpt-codex-connector` pass above only found the
+one P1). Full test suite independently re-run: 351 passed. Four adversarial probes executed
+directly against the real publish boundary; every finding below naming a runtime behavior was
+reproduced, not inferred. Verdict: **0 BLOCKER, 2 HIGH, 3 MEDIUM, 4 LOW.**
+
+- **HIGH 1** (publishing a schema-version-1 candidate crashes the Kernel boundary with an
+  unhandled `AttributeError` instead of a typed `Rejected` — reproduced:
+  `PROBE2 -> UNHANDLED AttributeError: '_LegacyCoverageEntryV1' object has no attribute
+  'evidence_class'`). `publish.py`'s `_publish_locked` never checks a candidate's declared
+  `schema_version` against the current version for its kind before running M6's new field
+  accesses, so a legacy-shaped candidate — a real caller-suppliable shape, since the retained
+  legacy readers accept it by design — hits an unguarded attribute access instead of a
+  rejection code. Violates the Kernel's core contract (`Published | Rejected`, never an
+  unhandled exception on caller input). **Fixed**: added a schema-freshness gate in
+  `_publish_locked`, before any kind-specific field access, comparing the candidate's declared
+  `schema_version` against `schema_version_for_kind(candidate_kind)`; mismatch returns a typed
+  `Rejected` with new code `PublishRejectionCode.STALE_SCHEMA_VERSION`. Mutation fixtures added
+  publishing schema-1 VERIFICATION and RESULT candidates, asserting the typed rejection. This
+  also closes MEDIUM 1 below (same root cause).
+- **HIGH 2** (round-1-committed schema-2 Verifications — round 1's `93acbab`, lacking
+  `verifier_execution_identity` — become unreadable after round 2, since round 2 reused the
+  same dispatch key `(VERIFICATION, 1, 2)` for a reader that now requires the new field
+  exactly; reproduced: `malformed_payload:
+  verification_payload_keys_missing=['verifier_execution_identity']`, which fails `replay()`
+  closed and makes the run permanently unpublishable-after). Same "silent history break" class
+  round 1's own HIGH 2 fixed for the v1→v2 bump, reintroduced one level in for the
+  round-1→round-2 shape change. **Fixed** (option (a) from the review, the honest
+  continuation of the established retention mechanism, not the disposable-state shortcut):
+  bumped `VERIFICATION_SCHEMA_VERSION` to 3 for round 2's shape; added a second retained
+  legacy reader for the round-1 v2 shape (`_LegacyVerificationV1RoundOne`, keyed
+  `(VERIFICATION, 1, 2)`, no `verifier_execution_identity`); the pre-M6 v1 legacy reader keeps
+  its existing key unchanged. Replay fixture added covering a round-1-shaped v2 Verification.
+- **MEDIUM 1** (the publish boundary admitted schema-1 RESULT candidates, committing records
+  that then permanently wedge the run — no subsequent VERIFICATION can pass the
+  `execution_identity`-presence check, and the linear per-kind chain means the run can never
+  reach a Receipt). Same root cause as HIGH 1. **Fixed** by HIGH 1's schema-freshness gate —
+  a v1 RESULT candidate now rejects at admission as stale-schema instead of committing a
+  dead end.
+- **MEDIUM 2** (this plan's own §6/§12 overclaimed what the execution-identity nonce proves —
+  "real evidence that this specific spawn happened" and "catches … fabricating both values
+  from the same process" are both false as stated; the mechanism only guarantees the two
+  *recorded* identities differ and that the honest producer path generates them in two OS
+  processes, not that fabrication is detected beyond simple value reuse). **Fixed**: reworded
+  §6 items 1/3 and the §12 exit bullet to the actually-delivered guarantee; a stronger
+  spawn-proof guarantee (child-contributed, parent-unpredictable material committed before
+  verification exists) is noted as M7+ design territory, not asserted here.
+- **MEDIUM 3** (the verifier subprocess's module resolution depends on ambient `PYTHONPATH`
+  with no explicit `env=`/`cwd=`, and `VerifierSubprocessError` discarded the child's stderr,
+  so the most likely real failure — `ModuleNotFoundError` in a differently-bootstrapped
+  parent — surfaces as an opaque returncode with the actual cause thrown away). **Fixed**:
+  `run_one_task.py`'s subprocess invocation now derives the src root explicitly from the
+  package location and prepends it to the child's `PYTHONPATH`; `VerifierSubprocessError`
+  now includes the child's captured stderr (truncated). Documented the invocation contract in
+  `product/docs/operations/installation.md`.
+- **LOW 1** (`read_legacy_verification_v1`'s v2-field guard missed
+  `verifier_execution_identity`, so a v1-declared candidate carrying only that field rejected
+  `MALFORMED_PAYLOAD` instead of the plan-claimed `UNSUPPORTED_SCHEMA_VERSION`). **Fixed**:
+  added the field to `has_v2_fields`; reader test added for that specific case.
+- **LOW 2** (no positive reader test for a `FindingV1` with a well-formed non-`None`
+  `predecessor` — only the rejecting combinations were tested). **Fixed**: added a test
+  asserting a `RESOLVED` FindingV1 with a well-formed `predecessor` `RecordRef` parses.
+- **LOW 3** (in-flight pre-M6 runs with a committed v1 PASS Verification could still publish
+  a terminal Receipt on which zero M6 checks ever ran — an emergent rather than stated
+  semantics). **Fixed**: stated explicitly in §7 that this is accepted (additive-bump
+  semantics: a pre-M6 Verification's `PASS` was already the authoritative admissibility
+  signal at commit time; M6 does not retroactively invalidate it), not silently emergent.
+- **LOW 4** (citation/cosmetic inaccuracies: plan §9 named the wrong test file for the
+  extended protocol-reader tests; §14's round-1 test count was stale; `read_result_v1`'s
+  docstring said "v2 payload" while the function/registration names still say `v1`;
+  `VerifierSubprocessError` dropped `error.cmd`/stdout in addition to stderr). **Fixed**: all
+  four corrected.
+
+Fixed in follow-up commit on the same PR #48 branch (round 3). Full validation re-run after
+the fixes: contracts/kernel/execution/verification suites plus `compileall`, independently
+outside the worktree, before merge.

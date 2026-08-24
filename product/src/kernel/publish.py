@@ -103,6 +103,7 @@ class PublishRejectionCode(StrEnum):
     )
     LOCK_CONTENTION_TIMEOUT = "lock_contention_timeout"
     RUN_ALREADY_TERMINAL = "run_already_terminal"
+    STALE_SCHEMA_VERSION = "stale_schema_version"
     ATTEMPT_TASK_BINDING_MISMATCH = "attempt_task_binding_mismatch"
     RESULT_ATTEMPT_BINDING_MISMATCH = "result_attempt_binding_mismatch"
     RESULT_ENVIRONMENT_BINDING_MISMATCH = "result_environment_binding_mismatch"
@@ -671,6 +672,13 @@ def _publish_locked(
         )
 
     candidate_kind = content["contract_kind"]
+    current_schema_version = schema_version_for_kind(ContractKind(candidate_kind))
+    if content["schema_version"] != current_schema_version:
+        return Rejected(
+            PublishRejectionCode.STALE_SCHEMA_VERSION,
+            f"candidate_schema_version={content['schema_version']} "
+            f"current_schema_version={current_schema_version}",
+        )
     expected_kind = _next_kind(head_kind)
     if candidate_kind != expected_kind.value:
         return Rejected(

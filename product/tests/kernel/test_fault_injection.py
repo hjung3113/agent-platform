@@ -140,7 +140,7 @@ def dispatch_verification(
         {
             "contract_kind": "verification",
             "protocol_version": 1,
-            "schema_version": 2,
+            "schema_version": 3,
             "payload": {
                 "result": result.to_canonical_value(),
                 "verifier_identity": "verifier-1",

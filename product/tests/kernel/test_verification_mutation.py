@@ -80,6 +80,19 @@ def read_payload(contract_kind: str, payload: dict) -> object:
     return result
 
 
+def read_schema_one_payload(contract_kind: str, payload: dict) -> ParsedCandidate:
+    result = read_candidate(
+        {
+            "contract_kind": contract_kind,
+            "protocol_version": PROTOCOL_VERSION,
+            "schema_version": 1,
+            "payload": payload,
+        }
+    )
+    assert result.ok, result.reason
+    return result.value
+
+
 def open_finding(criterion: str, description: str = "Criterion did not pass") -> FindingV1:
     return FindingV1(
         criterion=criterion,
@@ -396,6 +409,66 @@ class VerificationMutationTests(unittest.TestCase):
         assert isinstance(rejected, Rejected)
         self.assertEqual(
             rejected.code, PublishRejectionCode.RESULT_ENVIRONMENT_BINDING_MISMATCH
+        )
+
+    def test_stale_schema_result_and_verification_reject_typed(self) -> None:
+        prefix = self.build_prefix()
+        output_digest = prefix.result_value.output_snapshot_digest
+        legacy_result = read_schema_one_payload(
+            "result",
+            {
+                "attempt": prefix.attempt.record_ref.to_canonical_value(),
+                "output_snapshot_digest": output_digest,
+                "observation": {
+                    "runtime_identity": prefix.result_value.observation.runtime_identity,
+                    "output_snapshot_digest": output_digest,
+                },
+            },
+        )
+        rejected_result = publish(
+            self.state,
+            prefix.run_id,
+            legacy_result,
+            prefix.attempt.record_ref,
+            "mutation-stale-result",
+        )
+        self.assertIsInstance(rejected_result, Rejected)
+        assert isinstance(rejected_result, Rejected)
+        self.assertEqual(
+            rejected_result.code, PublishRejectionCode.STALE_SCHEMA_VERSION
+        )
+
+        result = self.publish_result(prefix)
+        self.assertIsInstance(result, Published)
+        assert isinstance(result, Published)
+        legacy_verification = read_schema_one_payload(
+            "verification",
+            {
+                "result": result.record_ref.to_canonical_value(),
+                "verifier_identity": VERIFIER_IDENTITY,
+                "coverage": [
+                    {
+                        "criterion": criterion,
+                        "status": "SATISFIED",
+                        "evidence_digest": output_digest,
+                    }
+                    for criterion in TASK.acceptance_criteria
+                ],
+                "verdict": "PASS",
+                "findings": [],
+            },
+        )
+        rejected_verification = publish(
+            self.state,
+            prefix.run_id,
+            legacy_verification,
+            result.record_ref,
+            "mutation-stale-verification",
+        )
+        self.assertIsInstance(rejected_verification, Rejected)
+        assert isinstance(rejected_verification, Rejected)
+        self.assertEqual(
+            rejected_verification.code, PublishRejectionCode.STALE_SCHEMA_VERSION
         )
 
 

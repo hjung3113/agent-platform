@@ -71,6 +71,15 @@ def verification_envelope(payload: object) -> dict:
     return {
         "contract_kind": "verification",
         "protocol_version": 1,
+        "schema_version": 3,
+        "payload": payload,
+    }
+
+
+def round_one_verification_envelope(payload: object) -> dict:
+    return {
+        "contract_kind": "verification",
+        "protocol_version": 1,
         "schema_version": 2,
         "payload": payload,
     }
@@ -180,6 +189,12 @@ def valid_verification_payload() -> dict:
         "verdict": "PASS",
         "findings": [],
     }
+
+
+def round_one_verification_payload() -> dict:
+    payload = valid_verification_payload()
+    del payload["verifier_execution_identity"]
+    return payload
 
 
 def legacy_verification_envelope(payload: object) -> dict:
@@ -821,6 +836,29 @@ class VerificationV1Tests(unittest.TestCase):
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
         )
 
+    def test_resolved_finding_with_predecessor_parses(self) -> None:
+        payload = valid_verification_payload()
+        payload["coverage"][0]["status"] = "UNSATISFIED"
+        payload["coverage"][0]["evidence_digest"] = None
+        payload["verdict"] = "FAIL"
+        predecessor = {
+            "contract_kind": "verification",
+            "record_id": "rec-verification-previous",
+            "content_digest": VERIFICATION_DIGEST,
+        }
+        payload["findings"] = [
+            finding_payload(
+                "Criterion one", state="RESOLVED", predecessor=predecessor
+            )
+        ]
+        result = read_verification(payload)
+        self.assertTrue(result.ok, result.reason)
+        self.assertEqual(result.value.value.findings[0].state, "RESOLVED")
+        self.assertEqual(
+            result.value.value.findings[0].predecessor.record_id,
+            "rec-verification-previous",
+        )
+
     def test_parent_kind_other_than_result_rejects(self) -> None:
         payload = valid_verification_payload()
         payload["result"]["contract_kind"] = "attempt_packet"
@@ -896,9 +934,29 @@ class VerificationSchemaDispatchTests(unittest.TestCase):
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
         )
 
+    def test_round_one_schema_two_verification_remains_readable(self) -> None:
+        result = read_candidate(
+            round_one_verification_envelope(round_one_verification_payload())
+        )
+        self.assertTrue(result.ok, result.reason)
+        self.assertEqual(result.value.value.verdict, "PASS")
+        self.assertEqual(result.value.value.findings, ())
+        self.assertFalse(hasattr(result.value.value, "verifier_execution_identity"))
+
     def test_schema_one_candidate_with_v2_fields_rejects_unsupported(self) -> None:
         payload = legacy_verification_payload()
         payload["verifier_runtime_capability_profile_identity"] = VERIFIER_PROFILE_DIGEST
+        result = read_candidate(legacy_verification_envelope(payload))
+        self.assertEqual(
+            result.rejection_code,
+            ProtocolRejectionCode.UNSUPPORTED_SCHEMA_VERSION,
+        )
+
+    def test_schema_one_candidate_with_verifier_execution_identity_rejects_unsupported(
+        self,
+    ) -> None:
+        payload = legacy_verification_payload()
+        payload["verifier_execution_identity"] = VERIFIER_EXECUTION_IDENTITY_DIGEST
         result = read_candidate(legacy_verification_envelope(payload))
         self.assertEqual(
             result.rejection_code,

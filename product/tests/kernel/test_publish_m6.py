@@ -143,7 +143,7 @@ def verification_candidate(
             "verdict": verdict,
             "findings": [] if findings is None else findings,
         },
-        schema_version=2,
+        schema_version=3,
     )
 
 

@@ -28,8 +28,9 @@ from kernel.runtime_capability import _require_versioned_identity
 
 PROTOCOL_VERSION = 1
 SCHEMA_VERSION = 1
+# Reader/function names remain protocol-v1 names; the current Result wire shape is schema 2.
 RESULT_SCHEMA_VERSION = 2
-VERIFICATION_SCHEMA_VERSION = 2
+VERIFICATION_SCHEMA_VERSION = 3
 
 _REQUEST_KEYS = frozenset({"objective", "scope", "acceptance_criteria"})
 _WORKFLOW_REVISION_KEYS = frozenset({"request", "task"})
@@ -56,6 +57,16 @@ _VERIFICATION_KEYS = frozenset(
         "verifier_identity",
         "verifier_runtime_capability_profile_identity",
         "verifier_execution_identity",
+        "coverage",
+        "verdict",
+        "findings",
+    }
+)
+_LEGACY_VERIFICATION_ROUND_ONE_KEYS = frozenset(
+    {
+        "result",
+        "verifier_identity",
+        "verifier_runtime_capability_profile_identity",
         "coverage",
         "verdict",
         "findings",
@@ -309,6 +320,30 @@ class _LegacyVerificationV1:
             "coverage": [entry.to_canonical_value() for entry in self.coverage],
             "verdict": self.verdict,
             "findings": list(self.findings),
+        }
+
+
+@dataclass(frozen=True)
+class _LegacyVerificationV1RoundOne:
+    """Retained round-1 Verification schema-2 shape used for replay only."""
+
+    result: RecordRef
+    verifier_identity: str
+    verifier_runtime_capability_profile_identity: str
+    coverage: tuple[CoverageEntryV1, ...]
+    verdict: str
+    findings: tuple[FindingV1, ...]
+
+    def to_canonical_value(self) -> dict[str, Any]:
+        return {
+            "result": self.result.to_canonical_value(),
+            "verifier_identity": self.verifier_identity,
+            "verifier_runtime_capability_profile_identity": (
+                self.verifier_runtime_capability_profile_identity
+            ),
+            "coverage": [entry.to_canonical_value() for entry in self.coverage],
+            "verdict": self.verdict,
+            "findings": [finding.to_canonical_value() for finding in self.findings],
         }
 
 
@@ -606,7 +641,7 @@ def _read_legacy_observation_v1(payload: Any) -> _LegacyRuntimeObservationV1:
 
 
 def read_result_v1(payload: Any) -> ReaderOutcome:
-    """Strictly read a Result v2 payload or raise ``ProtocolRejected``.
+    """Strictly read the current protocol-v1 Result payload.
 
     The Observation/Observation binding — ``observation
     .output_snapshot_digest`` equal to the sibling ``output_snapshot_digest``
@@ -854,7 +889,10 @@ def read_legacy_verification_v1(payload: Any) -> ReaderOutcome:
     candidate = _require_object(payload, "verification_payload")
     coverage_payload = candidate.get("coverage")
     findings_payload = candidate.get("findings")
-    has_v2_fields = "verifier_runtime_capability_profile_identity" in candidate
+    has_v2_fields = (
+        "verifier_runtime_capability_profile_identity" in candidate
+        or "verifier_execution_identity" in candidate
+    )
     if isinstance(coverage_payload, list) and any(
         isinstance(entry, dict) and "evidence_class" in entry
         for entry in coverage_payload
@@ -900,6 +938,59 @@ def read_legacy_verification_v1(payload: Any) -> ReaderOutcome:
         result=result,
         verifier_identity=_require_nonempty_string(
             candidate["verifier_identity"], "verification_verifier_identity"
+        ),
+        coverage=coverage,
+        verdict=verdict,
+        findings=findings,
+    )
+    return ReaderOutcome(
+        value=verification, canonical_payload=verification.to_canonical_value()
+    )
+
+
+def read_legacy_verification_v1_round_one(payload: Any) -> ReaderOutcome:
+    """Read the retained round-1 Verification schema-2 wire shape for replay."""
+
+    candidate = _require_object(payload, "verification_payload")
+    _require_exact_keys(
+        candidate, _LEGACY_VERIFICATION_ROUND_ONE_KEYS, "verification_payload"
+    )
+
+    result = read_record_ref(candidate["result"])
+    if result.contract_kind != ContractKind.RESULT:
+        raise ProtocolRejected(
+            ProtocolRejectionCode.BINDING_MISMATCH,
+            "verification_result_kind_not_result",
+        )
+    coverage = _read_coverage_v1(candidate["coverage"])
+    verdict = candidate["verdict"]
+    if not isinstance(verdict, str) or verdict not in _VERDICTS:
+        raise ProtocolRejected(
+            ProtocolRejectionCode.MALFORMED_PAYLOAD, "verification_verdict_invalid"
+        )
+    computed = _computed_verdict(coverage)
+    if verdict != computed:
+        raise ProtocolRejected(
+            ProtocolRejectionCode.MALFORMED_PAYLOAD,
+            f"verification_verdict_mismatch_declared={verdict}_computed={computed}",
+        )
+    verifier_runtime_capability_profile_identity = _require_content_digest(
+        candidate["verifier_runtime_capability_profile_identity"],
+        "verification_verifier_runtime_capability_profile_identity",
+    )
+    findings = _read_findings_v1(candidate["findings"])
+    if verdict == "PASS" and findings:
+        raise ProtocolRejected(
+            ProtocolRejectionCode.MALFORMED_PAYLOAD,
+            "verification_findings_nonempty_for_pass_verdict",
+        )
+    verification = _LegacyVerificationV1RoundOne(
+        result=result,
+        verifier_identity=_require_nonempty_string(
+            candidate["verifier_identity"], "verification_verifier_identity"
+        ),
+        verifier_runtime_capability_profile_identity=(
+            verifier_runtime_capability_profile_identity
         ),
         coverage=coverage,
         verdict=verdict,
@@ -1029,6 +1120,12 @@ register_reader(
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
     read_legacy_verification_v1,
+)
+register_reader(
+    ContractKind.VERIFICATION,
+    PROTOCOL_VERSION,
+    2,
+    read_legacy_verification_v1_round_one,
 )
 register_reader(
     ContractKind.VERIFICATION,

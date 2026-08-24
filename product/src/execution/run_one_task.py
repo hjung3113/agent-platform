@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -27,6 +28,8 @@ from execution import host
 from execution.attempt import build_attempt_packet, build_receipt
 from execution.context_compiler import compile_context_pack, disclosure_identity
 from execution.context_evidence import write_context_evidence
+
+_VERIFIER_DIAGNOSTIC_LIMIT = 4096
 
 
 class VerifierSubprocessError(Exception):
@@ -105,6 +108,27 @@ def _require_published(step: str, result: Published | Rejected) -> Published:
     return result
 
 
+def _truncate_verifier_diagnostic(value: object) -> str:
+    rendered = "<none>" if value is None else str(value)
+    if len(rendered) <= _VERIFIER_DIAGNOSTIC_LIMIT:
+        return rendered
+    return rendered[:_VERIFIER_DIAGNOSTIC_LIMIT] + "...<truncated>"
+
+
+def _verifier_subprocess_error(
+    reason: str,
+    *,
+    command: object,
+    stdout: object,
+    stderr: object,
+) -> VerifierSubprocessError:
+    return VerifierSubprocessError(
+        f"{reason}; cmd={command!r}; "
+        f"stdout={_truncate_verifier_diagnostic(stdout)!r}; "
+        f"stderr={_truncate_verifier_diagnostic(stderr)!r}"
+    )
+
+
 def _run_verifier_subprocess(
     *,
     result_ref: RecordRef,
@@ -124,27 +148,46 @@ def _run_verifier_subprocess(
         "opencode_binary_path": opencode_binary_path,
         "config_paths": [str(path) for path in config_paths],
     }
+    command = [sys.executable, "-m", "verification.stub_verifier_cli"]
+    child_environment = os.environ.copy()
+    src_root = str(Path(__file__).resolve().parents[1])
+    existing_pythonpath = child_environment.get("PYTHONPATH")
+    child_environment["PYTHONPATH"] = os.pathsep.join(
+        path for path in (src_root, existing_pythonpath) if path
+    )
     try:
         completed = subprocess.run(
-            [sys.executable, "-m", "verification.stub_verifier_cli"],
+            command,
             input=json.dumps(input_payload),
             capture_output=True,
             check=True,
             text=True,
+            env=child_environment,
         )
     except subprocess.CalledProcessError as error:
-        raise VerifierSubprocessError(
-            f"verifier_subprocess_failed_returncode={error.returncode}"
+        raise _verifier_subprocess_error(
+            f"verifier_subprocess_failed_returncode={error.returncode}",
+            command=error.cmd,
+            stdout=error.stdout,
+            stderr=error.stderr,
         ) from error
     except OSError as error:
-        raise VerifierSubprocessError(
-            f"verifier_subprocess_spawn_failed={error}"
+        raise _verifier_subprocess_error(
+            f"verifier_subprocess_spawn_failed={error}",
+            command=command,
+            stdout=None,
+            stderr=str(error),
         ) from error
 
     try:
         payload = json.loads(completed.stdout)
     except (TypeError, json.JSONDecodeError) as error:
-        raise VerifierSubprocessError("verifier_stdout_malformed") from error
+        raise _verifier_subprocess_error(
+            "verifier_stdout_malformed",
+            command=command,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        ) from error
     parsed = read_candidate(
         {
             "contract_kind": ContractKind.VERIFICATION.value,
@@ -154,11 +197,19 @@ def _run_verifier_subprocess(
         }
     )
     if not parsed.ok:
-        raise VerifierSubprocessError(
-            f"verifier_stdout_rejected={parsed.rejection_code}:{parsed.reason}"
+        raise _verifier_subprocess_error(
+            f"verifier_stdout_rejected={parsed.rejection_code}:{parsed.reason}",
+            command=command,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
         )
     if not isinstance(parsed.value.value, VerificationV1):
-        raise VerifierSubprocessError("verifier_stdout_not_verification")
+        raise _verifier_subprocess_error(
+            "verifier_stdout_not_verification",
+            command=command,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
     return parsed.value.value
 
 
