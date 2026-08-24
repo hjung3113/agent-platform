@@ -22,6 +22,10 @@ OTHER_DIGEST = "sha256:agent-platform-json-v1:" + "f" * 64
 OUTPUT_SNAPSHOT_DIGEST = "sha256:agent-platform-json-v1:" + "e" * 64
 RUNTIME_PROFILE_IDENTITY = content_digest({"fixture": "runtime-profile-m2"})
 VERIFIER_PROFILE_IDENTITY = content_digest({"fixture": "verifier-profile-m2"})
+EXECUTION_IDENTITY = content_digest({"fixture": "execution-identity-m2"})
+VERIFIER_EXECUTION_IDENTITY = content_digest(
+    {"fixture": "verifier-execution-identity-m2"}
+)
 TASK_ID = "task-1"
 IMPLEMENTER_IDENTITY = "implementer-1"
 VERIFIER_IDENTITY = "verifier-1"
@@ -120,13 +124,14 @@ def dispatch_result(
         {
             "contract_kind": "result",
             "protocol_version": 1,
-            "schema_version": 1,
+            "schema_version": 2,
             "payload": {
                 "attempt": attempt.to_canonical_value(),
                 "output_snapshot_digest": output_snapshot_digest,
                 "observation": {
                     "runtime_identity": runtime_identity,
                     "output_snapshot_digest": output_snapshot_digest,
+                    "execution_identity": EXECUTION_IDENTITY,
                 },
             },
         }
@@ -185,6 +190,7 @@ def dispatch_verification(
     findings: tuple[dict, ...] = (),
     verifier_identity: str = VERIFIER_IDENTITY,
     verifier_runtime_capability_profile_identity: str = VERIFIER_PROFILE_IDENTITY,
+    verifier_execution_identity: str = VERIFIER_EXECUTION_IDENTITY,
 ) -> ParsedCandidate:
     """Build a validated Verification candidate bound to ``result``."""
 
@@ -199,6 +205,7 @@ def dispatch_verification(
                 "verifier_runtime_capability_profile_identity": (
                     verifier_runtime_capability_profile_identity
                 ),
+                "verifier_execution_identity": verifier_execution_identity,
                 "coverage": coverage,
                 "verdict": verdict,
                 "findings": list(findings),

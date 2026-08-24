@@ -5,19 +5,28 @@ import unittest
 from dataclasses import dataclass
 
 from kernel.canonical import content_digest
-from kernel.protocol import ParsedCandidate, RecordRef, read_candidate
-from kernel.protocol_v1 import RESULT_SNAPSHOT_EVIDENCE_CLASS
+from kernel.protocol import ContractKind, ParsedCandidate, RecordRef, read_candidate
+from kernel.protocol_v1 import (
+    RESULT_SNAPSHOT_EVIDENCE_CLASS,
+    schema_version_for_kind,
+)
 from kernel.publish import Published, PublishRejectionCode, Rejected, publish
 
 OUTPUT_DIGEST = content_digest({"fixture": "m6-output"})
 RUNTIME_PROFILE_IDENTITY = content_digest({"fixture": "m6-runtime-profile"})
 VERIFIER_PROFILE_IDENTITY = content_digest({"fixture": "m6-verifier-profile"})
+EXECUTION_IDENTITY = content_digest({"fixture": "m6-execution-identity"})
+VERIFIER_EXECUTION_IDENTITY = content_digest(
+    {"fixture": "m6-verifier-execution-identity"}
+)
 CRITERIA = ["Criterion one", "Criterion two"]
 
 
 def read_dispatch(
-    contract_kind: str, payload: dict, *, schema_version: int = 1
+    contract_kind: str, payload: dict, *, schema_version: int | None = None
 ) -> ParsedCandidate:
+    if schema_version is None:
+        schema_version = schema_version_for_kind(ContractKind(contract_kind))
     result = read_candidate(
         {
             "contract_kind": contract_kind,
@@ -80,6 +89,7 @@ def result_candidate(
             "observation": {
                 "runtime_identity": runtime_identity,
                 "output_snapshot_digest": OUTPUT_DIGEST,
+                "execution_identity": EXECUTION_IDENTITY,
             },
         },
     )
@@ -120,6 +130,7 @@ def verification_candidate(
     findings: list[dict] | None = None,
     verifier_identity: str = "verifier-m6",
     verifier_profile: str = VERIFIER_PROFILE_IDENTITY,
+    verifier_execution_identity: str = VERIFIER_EXECUTION_IDENTITY,
 ) -> ParsedCandidate:
     return read_dispatch(
         "verification",
@@ -127,6 +138,7 @@ def verification_candidate(
             "result": result.to_canonical_value(),
             "verifier_identity": verifier_identity,
             "verifier_runtime_capability_profile_identity": verifier_profile,
+            "verifier_execution_identity": verifier_execution_identity,
             "coverage": coverage,
             "verdict": verdict,
             "findings": [] if findings is None else findings,
@@ -199,6 +211,7 @@ class PublishM6Tests(unittest.TestCase):
         *,
         findings: list[dict] | None = None,
         verifier_profile: str = VERIFIER_PROFILE_IDENTITY,
+        verifier_execution_identity: str = VERIFIER_EXECUTION_IDENTITY,
     ):
         self.counter += 1
         return publish(
@@ -210,6 +223,7 @@ class PublishM6Tests(unittest.TestCase):
                 verdict,
                 findings=findings,
                 verifier_profile=verifier_profile,
+                verifier_execution_identity=verifier_execution_identity,
             ),
             result.record_ref,
             f"m6-{self.counter}-verification",
@@ -364,6 +378,32 @@ class PublishM6Tests(unittest.TestCase):
             "PASS",
             verifier_profile=RUNTIME_PROFILE_IDENTITY,
         )
+        self.assertIsInstance(published, Published)
+
+    def test_verifier_execution_identity_must_differ_from_result(self) -> None:
+        prefix = self.prefix()
+        result = self.publish_result(prefix)
+        self.assertIsInstance(result, Published)
+        assert isinstance(result, Published)
+        coverage = [
+            coverage_entry(criterion, "SATISFIED", evidence_digest=OUTPUT_DIGEST)
+            for criterion in prefix.criteria
+        ]
+
+        rejected = self.publish_verification(
+            prefix,
+            result,
+            coverage,
+            "PASS",
+            verifier_execution_identity=EXECUTION_IDENTITY,
+        )
+        self.assertIsInstance(rejected, Rejected)
+        assert isinstance(rejected, Rejected)
+        self.assertEqual(
+            rejected.code, PublishRejectionCode.SELF_VERIFICATION_REJECTED
+        )
+
+        published = self.publish_verification(prefix, result, coverage, "PASS")
         self.assertIsInstance(published, Published)
 
 

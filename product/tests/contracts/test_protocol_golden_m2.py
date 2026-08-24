@@ -184,6 +184,7 @@ class GoldenM2VectorTests(unittest.TestCase):
             verifier_runtime_capability_profile_identity=(
                 verification.verifier_runtime_capability_profile_identity
             ),
+            verifier_execution_identity=verification.verifier_execution_identity,
             coverage=tuple(reversed(verification.coverage)),
             verdict=verification.verdict,
             findings=verification.findings,
@@ -232,6 +233,7 @@ class GoldenM2VectorTests(unittest.TestCase):
             observation=RuntimeObservationV1(
                 runtime_identity=result.observation.runtime_identity,
                 output_snapshot_digest="sha256:agent-platform-json-v1:" + "9" * 64,
+                execution_identity=result.observation.execution_identity,
             ),
         )
         self.assertNotEqual(result_base, result_v1_content_digest(changed_output))
@@ -244,6 +246,7 @@ class GoldenM2VectorTests(unittest.TestCase):
             verifier_runtime_capability_profile_identity=(
                 verification.verifier_runtime_capability_profile_identity
             ),
+            verifier_execution_identity=verification.verifier_execution_identity,
             coverage=(
                 CoverageEntryV1(
                     criterion=verification.coverage[0].criterion,
@@ -425,6 +428,7 @@ class StaleSubstitutedBindingM2Tests(unittest.TestCase):
                 observation=RuntimeObservationV1(
                     runtime_identity="stub-host-m2-amended",
                     output_snapshot_digest=result.observation.output_snapshot_digest,
+                    execution_identity=result.observation.execution_identity,
                 ),
             )
         )

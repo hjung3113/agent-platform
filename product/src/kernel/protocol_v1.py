@@ -28,6 +28,7 @@ from kernel.runtime_capability import _require_versioned_identity
 
 PROTOCOL_VERSION = 1
 SCHEMA_VERSION = 1
+RESULT_SCHEMA_VERSION = 2
 VERIFICATION_SCHEMA_VERSION = 2
 
 _REQUEST_KEYS = frozenset({"objective", "scope", "acceptance_criteria"})
@@ -44,12 +45,17 @@ _ATTEMPT_PACKET_KEYS = frozenset(
     }
 )
 _RESULT_KEYS = frozenset({"attempt", "output_snapshot_digest", "observation"})
-_OBSERVATION_KEYS = frozenset({"runtime_identity", "output_snapshot_digest"})
+_LEGACY_RESULT_KEYS = _RESULT_KEYS
+_OBSERVATION_KEYS = frozenset(
+    {"runtime_identity", "output_snapshot_digest", "execution_identity"}
+)
+_LEGACY_OBSERVATION_KEYS = frozenset({"runtime_identity", "output_snapshot_digest"})
 _VERIFICATION_KEYS = frozenset(
     {
         "result",
         "verifier_identity",
         "verifier_runtime_capability_profile_identity",
+        "verifier_execution_identity",
         "coverage",
         "verdict",
         "findings",
@@ -75,6 +81,7 @@ RESULT_SNAPSHOT_EVIDENCE_CLASS = "result_snapshot_digest_equality@1"
 RECEIPT_TYPE_TERMINAL = "terminal"
 
 _SCHEMA_VERSION_BY_KIND = {
+    ContractKind.RESULT: RESULT_SCHEMA_VERSION,
     ContractKind.VERIFICATION: VERIFICATION_SCHEMA_VERSION,
 }
 
@@ -151,11 +158,13 @@ class RuntimeObservationV1:
 
     runtime_identity: str
     output_snapshot_digest: str
+    execution_identity: str
 
     def to_canonical_value(self) -> dict[str, Any]:
         return {
             "runtime_identity": self.runtime_identity,
             "output_snapshot_digest": self.output_snapshot_digest,
+            "execution_identity": self.execution_identity,
         }
 
 
@@ -166,6 +175,36 @@ class ResultV1:
     attempt: RecordRef
     output_snapshot_digest: str
     observation: RuntimeObservationV1
+
+    def to_canonical_value(self) -> dict[str, Any]:
+        return {
+            "attempt": self.attempt.to_canonical_value(),
+            "output_snapshot_digest": self.output_snapshot_digest,
+            "observation": self.observation.to_canonical_value(),
+        }
+
+
+@dataclass(frozen=True)
+class _LegacyRuntimeObservationV1:
+    """Retained pre-round-2 Runtime Observation shape used for replay only."""
+
+    runtime_identity: str
+    output_snapshot_digest: str
+
+    def to_canonical_value(self) -> dict[str, Any]:
+        return {
+            "runtime_identity": self.runtime_identity,
+            "output_snapshot_digest": self.output_snapshot_digest,
+        }
+
+
+@dataclass(frozen=True)
+class _LegacyResultV1:
+    """Retained pre-round-2 Result shape used for replay only."""
+
+    attempt: RecordRef
+    output_snapshot_digest: str
+    observation: _LegacyRuntimeObservationV1
 
     def to_canonical_value(self) -> dict[str, Any]:
         return {
@@ -220,6 +259,7 @@ class VerificationV1:
     result: RecordRef
     verifier_identity: str
     verifier_runtime_capability_profile_identity: str
+    verifier_execution_identity: str
     coverage: tuple[CoverageEntryV1, ...]
     verdict: str
     findings: tuple[FindingV1, ...]
@@ -231,6 +271,7 @@ class VerificationV1:
             "verifier_runtime_capability_profile_identity": (
                 self.verifier_runtime_capability_profile_identity
             ),
+            "verifier_execution_identity": self.verifier_execution_identity,
             "coverage": [entry.to_canonical_value() for entry in self.coverage],
             "verdict": self.verdict,
             "findings": [finding.to_canonical_value() for finding in self.findings],
@@ -544,11 +585,28 @@ def _read_observation_v1(payload: Any) -> RuntimeObservationV1:
             observation["output_snapshot_digest"],
             "observation_output_snapshot_digest",
         ),
+        execution_identity=_require_content_digest(
+            observation["execution_identity"], "observation_execution_identity"
+        ),
+    )
+
+
+def _read_legacy_observation_v1(payload: Any) -> _LegacyRuntimeObservationV1:
+    observation = _require_object(payload, "observation")
+    _require_exact_keys(observation, _LEGACY_OBSERVATION_KEYS, "observation")
+    return _LegacyRuntimeObservationV1(
+        runtime_identity=_require_nonempty_string(
+            observation["runtime_identity"], "observation_runtime_identity"
+        ),
+        output_snapshot_digest=_require_content_digest(
+            observation["output_snapshot_digest"],
+            "observation_output_snapshot_digest",
+        ),
     )
 
 
 def read_result_v1(payload: Any) -> ReaderOutcome:
-    """Strictly read a Result v1 payload or raise ``ProtocolRejected``.
+    """Strictly read a Result v2 payload or raise ``ProtocolRejected``.
 
     The Observation/Observation binding — ``observation
     .output_snapshot_digest`` equal to the sibling ``output_snapshot_digest``
@@ -576,6 +634,47 @@ def read_result_v1(payload: Any) -> ReaderOutcome:
             "result_observation_output_snapshot_digest_mismatch",
         )
     result = ResultV1(
+        attempt=attempt,
+        output_snapshot_digest=output_snapshot_digest,
+        observation=observation,
+    )
+    return ReaderOutcome(
+        value=result, canonical_payload=result.to_canonical_value()
+    )
+
+
+def read_legacy_result_v1(payload: Any) -> ReaderOutcome:
+    """Read the retained pre-round-2 Result v1 wire shape for replay."""
+
+    candidate = _require_object(payload, "result_payload")
+    observation_payload = candidate.get("observation")
+    has_v2_fields = "execution_identity" in candidate or (
+        isinstance(observation_payload, dict)
+        and "execution_identity" in observation_payload
+    )
+    if has_v2_fields:
+        raise ProtocolRejected(
+            ProtocolRejectionCode.UNSUPPORTED_SCHEMA_VERSION,
+            "result_v2_fields_under_schema_v1",
+        )
+    _require_exact_keys(candidate, _LEGACY_RESULT_KEYS, "result_payload")
+
+    attempt = read_record_ref(candidate["attempt"])
+    if attempt.contract_kind != ContractKind.ATTEMPT_PACKET:
+        raise ProtocolRejected(
+            ProtocolRejectionCode.BINDING_MISMATCH,
+            "result_attempt_kind_not_attempt_packet",
+        )
+    output_snapshot_digest = _require_content_digest(
+        candidate["output_snapshot_digest"], "result_output_snapshot_digest"
+    )
+    observation = _read_legacy_observation_v1(candidate["observation"])
+    if observation.output_snapshot_digest != output_snapshot_digest:
+        raise ProtocolRejected(
+            ProtocolRejectionCode.MALFORMED_PAYLOAD,
+            "result_observation_output_snapshot_digest_mismatch",
+        )
+    result = _LegacyResultV1(
         attempt=attempt,
         output_snapshot_digest=output_snapshot_digest,
         observation=observation,
@@ -847,6 +946,10 @@ def read_verification_v1(payload: Any) -> ReaderOutcome:
         candidate["verifier_runtime_capability_profile_identity"],
         "verification_verifier_runtime_capability_profile_identity",
     )
+    verifier_execution_identity = _require_content_digest(
+        candidate["verifier_execution_identity"],
+        "verification_verifier_execution_identity",
+    )
     findings = _read_findings_v1(candidate["findings"])
     if verdict == "PASS" and findings:
         raise ProtocolRejected(
@@ -861,6 +964,7 @@ def read_verification_v1(payload: Any) -> ReaderOutcome:
         verifier_runtime_capability_profile_identity=(
             verifier_runtime_capability_profile_identity
         ),
+        verifier_execution_identity=verifier_execution_identity,
         coverage=coverage,
         verdict=verdict,
         findings=findings,
@@ -909,7 +1013,16 @@ register_reader(
     ContractKind.ATTEMPT_PACKET, PROTOCOL_VERSION, SCHEMA_VERSION, read_attempt_packet_v1
 )
 register_reader(
-    ContractKind.RESULT, PROTOCOL_VERSION, SCHEMA_VERSION, read_result_v1
+    ContractKind.RESULT,
+    PROTOCOL_VERSION,
+    SCHEMA_VERSION,
+    read_legacy_result_v1,
+)
+register_reader(
+    ContractKind.RESULT,
+    PROTOCOL_VERSION,
+    RESULT_SCHEMA_VERSION,
+    read_result_v1,
 )
 register_reader(
     ContractKind.VERIFICATION,

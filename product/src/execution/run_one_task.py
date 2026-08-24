@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,8 +27,10 @@ from execution import host
 from execution.attempt import build_attempt_packet, build_receipt
 from execution.context_compiler import compile_context_pack, disclosure_identity
 from execution.context_evidence import write_context_evidence
-from execution.opencode_adapter import probe_opencode_profile
-from verification.stub_verifier import stub_verify
+
+
+class VerifierSubprocessError(Exception):
+    """The verifier child failed or did not emit a valid Verification."""
 
 
 @dataclass(frozen=True)
@@ -98,6 +103,63 @@ def _require_published(step: str, result: Published | Rejected) -> Published:
             f"unexpected publish rejection at step {step}: {result.code}"
         )
     return result
+
+
+def _run_verifier_subprocess(
+    *,
+    result_ref: RecordRef,
+    result_output_snapshot_digest: str,
+    task: TaskV1,
+    verifier_identity: str,
+    expected_output_digest: str,
+    opencode_binary_path: str,
+    config_paths: tuple[Path, ...],
+) -> VerificationV1:
+    input_payload = {
+        "result_ref": result_ref.to_canonical_value(),
+        "result_output_snapshot_digest": result_output_snapshot_digest,
+        "task": task.to_canonical_value(),
+        "verifier_identity": verifier_identity,
+        "expected_output_digest": expected_output_digest,
+        "opencode_binary_path": opencode_binary_path,
+        "config_paths": [str(path) for path in config_paths],
+    }
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "verification.stub_verifier_cli"],
+            input=json.dumps(input_payload),
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        raise VerifierSubprocessError(
+            f"verifier_subprocess_failed_returncode={error.returncode}"
+        ) from error
+    except OSError as error:
+        raise VerifierSubprocessError(
+            f"verifier_subprocess_spawn_failed={error}"
+        ) from error
+
+    try:
+        payload = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise VerifierSubprocessError("verifier_stdout_malformed") from error
+    parsed = read_candidate(
+        {
+            "contract_kind": ContractKind.VERIFICATION.value,
+            "protocol_version": PROTOCOL_VERSION,
+            "schema_version": schema_version_for_kind(ContractKind.VERIFICATION),
+            "payload": payload,
+        }
+    )
+    if not parsed.ok:
+        raise VerifierSubprocessError(
+            f"verifier_stdout_rejected={parsed.rejection_code}:{parsed.reason}"
+        )
+    if not isinstance(parsed.value.value, VerificationV1):
+        raise VerifierSubprocessError("verifier_stdout_not_verification")
+    return parsed.value.value
 
 
 def run_one_task(
@@ -226,14 +288,14 @@ def run_one_task(
         ),
     )
 
-    verifier_profile = probe_opencode_profile(opencode_binary_path, config_paths)
-    verification_value = stub_verify(
+    verification_value = _run_verifier_subprocess(
         result_ref=result_published.record_ref,
         result_output_snapshot_digest=result_value.output_snapshot_digest,
         task=task,
         verifier_identity=verifier_identity,
-        verifier_runtime_capability_profile_identity=verifier_profile.identity,
         expected_output_digest=expected_output_digest,
+        opencode_binary_path=opencode_binary_path,
+        config_paths=config_paths,
     )
     verification_published = _require_published(
         "verification",

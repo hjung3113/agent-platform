@@ -224,6 +224,9 @@ class VerificationMutationTests(unittest.TestCase):
             verifier_runtime_capability_profile_identity=(
                 prefix.attempt_value.runtime_capability_profile_identity
             ),
+            verifier_execution_identity=content_digest(
+                {"fixture": "verifier-execution-m6"}
+            ),
             coverage=coverage,
             verdict="PASS",
             findings=(),
@@ -292,6 +295,25 @@ class VerificationMutationTests(unittest.TestCase):
             PublishRejectionCode.SELF_VERIFICATION_REJECTED,
         )
 
+    def test_verifier_execution_identity_collision_rejects(self) -> None:
+        self.publish_valid_sibling()
+        prefix = self.build_prefix()
+        result = self.publish_result(prefix)
+        self.assertIsInstance(result, Published)
+        assert isinstance(result, Published)
+        payload = self.base_verification(prefix, result).to_canonical_value()
+        payload["verifier_execution_identity"] = (
+            prefix.result_value.observation.execution_identity
+        )
+        parsed = read_payload("verification", payload)
+        self.assertTrue(parsed.ok, parsed.reason)
+        rejected = self.publish_verification(prefix, result, parsed.value.value)
+        self.assertIsInstance(rejected, Rejected)
+        assert isinstance(rejected, Rejected)
+        self.assertEqual(
+            rejected.code, PublishRejectionCode.SELF_VERIFICATION_REJECTED
+        )
+
     def test_missing_finding_for_non_satisfied_coverage_rejects(self) -> None:
         def mutate(payload: dict) -> None:
             payload["coverage"][0].update(status="UNSATISFIED", evidence_digest=None)
@@ -337,6 +359,27 @@ class VerificationMutationTests(unittest.TestCase):
             parsed.rejection_code, ProtocolRejectionCode.MALFORMED_PAYLOAD
         )
 
+    def test_malformed_verifier_execution_identity_rejects_at_reader(self) -> None:
+        prefix = self.build_prefix()
+        result = self.publish_result(prefix)
+        self.assertIsInstance(result, Published)
+        assert isinstance(result, Published)
+        payload = self.base_verification(prefix, result).to_canonical_value()
+        payload["verifier_execution_identity"] = "not-a-digest"
+        parsed = read_payload("verification", payload)
+        self.assertEqual(
+            parsed.rejection_code, ProtocolRejectionCode.MALFORMED_PAYLOAD
+        )
+
+    def test_malformed_observation_execution_identity_rejects_at_reader(self) -> None:
+        prefix = self.build_prefix()
+        payload = prefix.result_value.to_canonical_value()
+        payload["observation"]["execution_identity"] = "not-a-digest"
+        parsed = read_payload("result", payload)
+        self.assertEqual(
+            parsed.rejection_code, ProtocolRejectionCode.MALFORMED_PAYLOAD
+        )
+
     def test_result_environment_identity_mismatch_rejects(self) -> None:
         self.publish_valid_sibling()
         prefix = self.build_prefix()
@@ -345,6 +388,7 @@ class VerificationMutationTests(unittest.TestCase):
             observation=RuntimeObservationV1(
                 runtime_identity=WRONG_DIGEST,
                 output_snapshot_digest=prefix.result_value.output_snapshot_digest,
+                execution_identity=prefix.result_value.observation.execution_identity,
             ),
         )
         rejected = self.publish_result(prefix, mutated)

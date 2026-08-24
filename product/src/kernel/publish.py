@@ -416,6 +416,19 @@ def _kind_binding_rejection(
                 PublishRejectionCode.SELF_VERIFICATION_REJECTED,
                 f"verifier_identity={value.verifier_identity!r}",
             )
+        result_execution_identity = getattr(
+            result_value.observation, "execution_identity", None
+        )
+        if result_execution_identity is None:
+            return Rejected(
+                PublishRejectionCode.SELF_VERIFICATION_REJECTED,
+                "result_observation_execution_identity_missing",
+            )
+        if value.verifier_execution_identity == result_execution_identity:
+            return Rejected(
+                PublishRejectionCode.SELF_VERIFICATION_REJECTED,
+                "verifier_execution_identity_matches_result_execution_identity",
+            )
         return None
     if kind == ContractKind.RECEIPT.value:
         verification_ref, verification_value = _committed_contract(

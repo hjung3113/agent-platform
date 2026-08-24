@@ -6,7 +6,7 @@
     "verification": {
       "contract_kind": "verification",
       "record_id": "rec-verification-0001",
-      "content_digest": "sha256:agent-platform-json-v1:7bdc2e7075668e93334a65b2379d15eb209afb638cbe23f2da903a1cb9ada458"
+      "content_digest": "sha256:agent-platform-json-v1:1e7ce06cf57f4885cec619fa16b2809a8de69f5d724009592f826d6074d95566"
     },
     "receipt_type": "terminal"
   }

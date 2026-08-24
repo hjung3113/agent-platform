@@ -36,6 +36,8 @@ VERIFICATION_DIGEST = "sha256:agent-platform-json-v1:" + "d" * 64
 OUTPUT_SNAPSHOT_DIGEST = "sha256:agent-platform-json-v1:" + "e" * 64
 OTHER_SNAPSHOT_DIGEST = "sha256:agent-platform-json-v1:" + "0" * 64
 VERIFIER_PROFILE_DIGEST = "sha256:agent-platform-json-v1:" + "f" * 64
+EXECUTION_IDENTITY_DIGEST = "sha256:agent-platform-json-v1:" + "1" * 64
+VERIFIER_EXECUTION_IDENTITY_DIGEST = "sha256:agent-platform-json-v1:" + "2" * 64
 
 
 def attempt_envelope(payload: object) -> dict:
@@ -48,6 +50,15 @@ def attempt_envelope(payload: object) -> dict:
 
 
 def result_envelope(payload: object) -> dict:
+    return {
+        "contract_kind": "result",
+        "protocol_version": 1,
+        "schema_version": 2,
+        "payload": payload,
+    }
+
+
+def legacy_result_envelope(payload: object) -> dict:
     return {
         "contract_kind": "result",
         "protocol_version": 1,
@@ -100,6 +111,7 @@ def valid_result_payload() -> dict:
         "observation": {
             "runtime_identity": "runtime-1",
             "output_snapshot_digest": OUTPUT_SNAPSHOT_DIGEST,
+            "execution_identity": EXECUTION_IDENTITY_DIGEST,
         },
     }
 
@@ -160,6 +172,7 @@ def valid_verification_payload() -> dict:
         },
         "verifier_identity": "verifier-1",
         "verifier_runtime_capability_profile_identity": VERIFIER_PROFILE_DIGEST,
+        "verifier_execution_identity": VERIFIER_EXECUTION_IDENTITY_DIGEST,
         "coverage": [
             satisfied_entry("Criterion one"),
             satisfied_entry("Criterion two"),
@@ -195,6 +208,21 @@ def legacy_verification_payload() -> dict:
         ],
         "verdict": "PASS",
         "findings": [],
+    }
+
+
+def legacy_result_payload() -> dict:
+    return {
+        "attempt": {
+            "contract_kind": "attempt_packet",
+            "record_id": "rec-attempt-legacy",
+            "content_digest": ATTEMPT_PACKET_DIGEST,
+        },
+        "output_snapshot_digest": OUTPUT_SNAPSHOT_DIGEST,
+        "observation": {
+            "runtime_identity": "legacy-runtime",
+            "output_snapshot_digest": OUTPUT_SNAPSHOT_DIGEST,
+        },
     }
 
 
@@ -251,6 +279,7 @@ def expected_result() -> ResultV1:
         observation=RuntimeObservationV1(
             runtime_identity="runtime-1",
             output_snapshot_digest=OUTPUT_SNAPSHOT_DIGEST,
+            execution_identity=EXECUTION_IDENTITY_DIGEST,
         ),
     )
 
@@ -264,6 +293,7 @@ def expected_verification() -> VerificationV1:
         ),
         verifier_identity="verifier-1",
         verifier_runtime_capability_profile_identity=VERIFIER_PROFILE_DIGEST,
+        verifier_execution_identity=VERIFIER_EXECUTION_IDENTITY_DIGEST,
         coverage=(
             CoverageEntryV1(
                 criterion="Criterion one",
@@ -449,6 +479,31 @@ class ResultV1Tests(unittest.TestCase):
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
         )
 
+    def test_execution_identity_requires_content_digest_shape(self) -> None:
+        for identity in ("", "execution@1", "not-a-digest", None, 1):
+            payload = valid_result_payload()
+            payload["observation"]["execution_identity"] = identity
+            self.assertEqual(
+                read_result(payload).rejection_code,
+                ProtocolRejectionCode.MALFORMED_PAYLOAD,
+                repr(identity),
+            )
+
+    def test_schema_one_legacy_result_remains_readable(self) -> None:
+        result = read_candidate(legacy_result_envelope(legacy_result_payload()))
+        self.assertTrue(result.ok, result.reason)
+        self.assertEqual(result.value.value.output_snapshot_digest, OUTPUT_SNAPSHOT_DIGEST)
+        self.assertFalse(hasattr(result.value.value.observation, "execution_identity"))
+
+    def test_schema_one_result_with_v2_fields_rejects_unsupported(self) -> None:
+        payload = legacy_result_payload()
+        payload["observation"]["execution_identity"] = EXECUTION_IDENTITY_DIGEST
+        result = read_candidate(legacy_result_envelope(payload))
+        self.assertEqual(
+            result.rejection_code,
+            ProtocolRejectionCode.UNSUPPORTED_SCHEMA_VERSION,
+        )
+
     def test_output_snapshot_digest_not_content_digest_shaped_rejects(self) -> None:
         payload = valid_result_payload()
         payload["output_snapshot_digest"] = "not-a-digest"
@@ -485,6 +540,7 @@ class ResultV1Tests(unittest.TestCase):
             observation=RuntimeObservationV1(
                 runtime_identity="runtime-2",
                 output_snapshot_digest=result.output_snapshot_digest,
+                execution_identity=result.observation.execution_identity,
             ),
         )
         self.assertNotEqual(
@@ -518,6 +574,7 @@ class VerificationV1Tests(unittest.TestCase):
             "result",
             "verifier_identity",
             "verifier_runtime_capability_profile_identity",
+            "verifier_execution_identity",
             "coverage",
             "verdict",
             "findings",
@@ -955,6 +1012,7 @@ class DirectReaderRejectionTests(unittest.TestCase):
                     "observation": {
                         "runtime_identity": "runtime-1",
                         "output_snapshot_digest": OTHER_SNAPSHOT_DIGEST,
+                        "execution_identity": EXECUTION_IDENTITY_DIGEST,
                     },
                 }
             )
@@ -968,6 +1026,7 @@ class DirectReaderRejectionTests(unittest.TestCase):
                     },
                     "verifier_identity": "verifier-1",
                     "verifier_runtime_capability_profile_identity": VERIFIER_PROFILE_DIGEST,
+                    "verifier_execution_identity": VERIFIER_EXECUTION_IDENTITY_DIGEST,
                     "coverage": [],
                     "verdict": "PASS",
                     "findings": [],

@@ -16,6 +16,10 @@ OTHER_DIGEST = "sha256:agent-platform-json-v1:" + "f" * 64
 OUTPUT_SNAPSHOT_DIGEST = "sha256:agent-platform-json-v1:" + "e" * 64
 RUNTIME_PROFILE_IDENTITY = content_digest({"fixture": "runtime-profile-replay"})
 VERIFIER_PROFILE_IDENTITY = content_digest({"fixture": "verifier-profile-replay"})
+EXECUTION_IDENTITY = content_digest({"fixture": "execution-identity-replay"})
+VERIFIER_EXECUTION_IDENTITY = content_digest(
+    {"fixture": "verifier-execution-identity-replay"}
+)
 CRITERIA = ["Replay is deterministic"]
 
 
@@ -99,13 +103,14 @@ def dispatch_result(
         {
             "contract_kind": "result",
             "protocol_version": 1,
-            "schema_version": 1,
+            "schema_version": 2,
             "payload": {
                 "attempt": attempt.to_canonical_value(),
                 "output_snapshot_digest": output_snapshot_digest,
                 "observation": {
                     "runtime_identity": runtime_identity,
                     "output_snapshot_digest": output_snapshot_digest,
+                    "execution_identity": EXECUTION_IDENTITY,
                 },
             },
         }
@@ -131,6 +136,7 @@ def dispatch_verification(
                 "result": result.to_canonical_value(),
                 "verifier_identity": "verifier-1",
                 "verifier_runtime_capability_profile_identity": VERIFIER_PROFILE_IDENTITY,
+                "verifier_execution_identity": VERIFIER_EXECUTION_IDENTITY,
                 "coverage": coverage,
                 "verdict": verdict,
                 "findings": list(findings),
@@ -415,6 +421,59 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(state.verification.verdict, "PASS")
         self.assertEqual(state.verification.findings, ())
         self.assertFalse(state.terminal)
+
+    def test_legacy_v1_result_record_replays_after_result_schema_bump(self) -> None:
+        genesis = publish(self.state, None, dispatch_request(), None, "key-1")
+        self.assertIsInstance(genesis, Published)
+        workflow = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_workflow(genesis.record_ref),
+            genesis.record_ref,
+            "key-2",
+        )
+        self.assertIsInstance(workflow, Published)
+        attempt = publish(
+            self.state,
+            genesis.run_id,
+            dispatch_attempt(workflow.record_ref),
+            workflow.record_ref,
+            "key-3",
+        )
+        self.assertIsInstance(attempt, Published)
+
+        candidate = {
+            "contract_kind": "result",
+            "protocol_version": 1,
+            "schema_version": 1,
+            "payload": {
+                "attempt": attempt.record_ref.to_canonical_value(),
+                "output_snapshot_digest": OUTPUT_SNAPSHOT_DIGEST,
+                "observation": {
+                    "runtime_identity": RUNTIME_PROFILE_IDENTITY,
+                    "output_snapshot_digest": OUTPUT_SNAPSHOT_DIGEST,
+                },
+            },
+        }
+        sequence = 4
+        record_id = f"{genesis.run_id}:{sequence:010d}"
+        record = {
+            "run_id": genesis.run_id,
+            "sequence": sequence,
+            "record_id": record_id,
+            "content_digest": content_digest(candidate),
+            "idempotency_key": "legacy-result-fixture",
+            "candidate": candidate,
+        }
+        run_dir = Path(self.state) / "runs" / genesis.run_id
+        (run_dir / f"{sequence:010d}.json").write_bytes(canonical_json_bytes(record))
+
+        state = replay(self.state, genesis.run_id)
+        self.assertEqual(state.last_sequence, 4)
+        self.assertIsNotNone(state.result)
+        assert state.result is not None
+        self.assertFalse(hasattr(state.result.observation, "execution_identity"))
+        self.assertEqual(state.result.observation.runtime_identity, RUNTIME_PROFILE_IDENTITY)
 
     def test_fail_terminated_five_record_run_is_not_terminal(self) -> None:
         genesis = publish(self.state, None, dispatch_request(), None, "key-1")

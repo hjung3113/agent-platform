@@ -27,6 +27,10 @@ from kernel.replay import RunState, replay
 
 RUNTIME_PROFILE_IDENTITY = content_digest({"fixture": "runtime-profile-fault"})
 VERIFIER_PROFILE_IDENTITY = content_digest({"fixture": "verifier-profile-fault"})
+EXECUTION_IDENTITY = content_digest({"fixture": "execution-identity-fault"})
+VERIFIER_EXECUTION_IDENTITY = content_digest(
+    {"fixture": "verifier-execution-identity-fault"}
+)
 
 
 def dispatch_request(
@@ -109,13 +113,14 @@ def dispatch_result(
         {
             "contract_kind": "result",
             "protocol_version": 1,
-            "schema_version": 1,
+            "schema_version": 2,
             "payload": {
                 "attempt": attempt.to_canonical_value(),
                 "output_snapshot_digest": output_snapshot_digest,
                 "observation": {
                     "runtime_identity": runtime_identity,
                     "output_snapshot_digest": output_snapshot_digest,
+                    "execution_identity": EXECUTION_IDENTITY,
                 },
             },
         }
@@ -140,6 +145,7 @@ def dispatch_verification(
                 "result": result.to_canonical_value(),
                 "verifier_identity": "verifier-1",
                 "verifier_runtime_capability_profile_identity": VERIFIER_PROFILE_IDENTITY,
+                "verifier_execution_identity": VERIFIER_EXECUTION_IDENTITY,
                 "coverage": [
                     {
                         "criterion": criterion,

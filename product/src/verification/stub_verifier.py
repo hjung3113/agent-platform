@@ -25,6 +25,7 @@ def stub_verify(
     task: TaskV1,
     verifier_identity: str,
     verifier_runtime_capability_profile_identity: str,
+    verifier_execution_identity: str,
     expected_output_digest: str,
 ) -> VerificationV1:
     """Build a Verification candidate by plain digest equality per criterion.
@@ -70,6 +71,7 @@ def stub_verify(
         verifier_runtime_capability_profile_identity=(
             verifier_runtime_capability_profile_identity
         ),
+        verifier_execution_identity=verifier_execution_identity,
         coverage=coverage,
         verdict=verdict,
         findings=findings,

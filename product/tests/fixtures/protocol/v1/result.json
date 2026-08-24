@@ -1,7 +1,7 @@
 {
   "contract_kind": "result",
   "protocol_version": 1,
-  "schema_version": 1,
+  "schema_version": 2,
   "payload": {
     "attempt": {
       "contract_kind": "attempt_packet",
@@ -11,7 +11,8 @@
     "output_snapshot_digest": "sha256:agent-platform-json-v1:162495ee90155423030f305bc49c79851391e2d3d8b7180cea2f9ab592c3a1ad",
     "observation": {
       "runtime_identity": "stub-host-m2",
-      "output_snapshot_digest": "sha256:agent-platform-json-v1:162495ee90155423030f305bc49c79851391e2d3d8b7180cea2f9ab592c3a1ad"
+      "output_snapshot_digest": "sha256:agent-platform-json-v1:162495ee90155423030f305bc49c79851391e2d3d8b7180cea2f9ab592c3a1ad",
+      "execution_identity": "sha256:agent-platform-json-v1:1111111111111111111111111111111111111111111111111111111111111111"
     }
   }
 }

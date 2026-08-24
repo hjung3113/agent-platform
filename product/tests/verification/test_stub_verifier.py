@@ -25,6 +25,7 @@ TASK = TaskV1(
 )
 EXPECTED = content_digest({"fixture": "expected-output"})
 VERIFIER_PROFILE_IDENTITY = content_digest({"fixture": "verifier-profile"})
+VERIFIER_EXECUTION_IDENTITY = content_digest({"fixture": "verifier-execution"})
 
 
 def _output_digest(seed: str) -> str:
@@ -39,6 +40,7 @@ class StubVerifyTest(unittest.TestCase):
             TASK,
             "verifier-1",
             VERIFIER_PROFILE_IDENTITY,
+            VERIFIER_EXECUTION_IDENTITY,
             EXPECTED,
         )
         self.assertEqual(verification.verdict, "PASS")
@@ -53,6 +55,10 @@ class StubVerifyTest(unittest.TestCase):
             verification.verifier_runtime_capability_profile_identity,
             VERIFIER_PROFILE_IDENTITY,
         )
+        self.assertEqual(
+            verification.verifier_execution_identity,
+            VERIFIER_EXECUTION_IDENTITY,
+        )
 
     def test_fail_with_findings_when_digests_differ(self) -> None:
         actual = _output_digest("not-expected")
@@ -62,6 +68,7 @@ class StubVerifyTest(unittest.TestCase):
             TASK,
             "verifier-1",
             VERIFIER_PROFILE_IDENTITY,
+            VERIFIER_EXECUTION_IDENTITY,
             EXPECTED,
         )
         self.assertEqual(verification.verdict, "FAIL")
@@ -84,6 +91,7 @@ class StubVerifyTest(unittest.TestCase):
             TASK,
             "verifier-1",
             VERIFIER_PROFILE_IDENTITY,
+            VERIFIER_EXECUTION_IDENTITY,
             EXPECTED,
         )
         self.assertEqual(verification.result, RESULT_REF)
@@ -98,6 +106,7 @@ class StubVerifyTest(unittest.TestCase):
                 TASK,
                 "verifier-1",
                 VERIFIER_PROFILE_IDENTITY,
+                VERIFIER_EXECUTION_IDENTITY,
                 EXPECTED,
             )
             outcome = read_verification_v1(verification.to_canonical_value())
@@ -110,6 +119,7 @@ class StubVerifyTest(unittest.TestCase):
             TASK,
             "verifier-1",
             VERIFIER_PROFILE_IDENTITY,
+            VERIFIER_EXECUTION_IDENTITY,
             EXPECTED,
         )
         second = stub_verify(
@@ -118,6 +128,7 @@ class StubVerifyTest(unittest.TestCase):
             TASK,
             "verifier-1",
             VERIFIER_PROFILE_IDENTITY,
+            VERIFIER_EXECUTION_IDENTITY,
             EXPECTED,
         )
         self.assertIsInstance(first, VerificationV1)
