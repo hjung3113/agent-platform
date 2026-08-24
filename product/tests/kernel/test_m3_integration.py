@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import importlib
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from kernel.canonical import content_digest
 from kernel.protocol import ParsedCandidate, read_candidate
@@ -17,7 +19,7 @@ from kernel.protocol_v1 import (
 from kernel.publish import PublishRejectionCode, Rejected, publish
 from kernel.replay import replay
 from execution.attempt import build_receipt
-from execution.run_one_task import run_one_task
+from execution.run_one_task import VerifierSubprocessError, run_one_task
 from execution.workspace_snapshot import snapshot_identity
 
 
@@ -126,6 +128,10 @@ class M3IntegrationTests(unittest.TestCase):
         self.assertEqual(chain.verification_value.verdict, "PASS")
         self.assertIsNotNone(chain.receipt)
         self.assertIsNotNone(chain.receipt_value)
+        self.assertNotEqual(
+            chain.result_value.observation.execution_identity,
+            chain.verification_value.verifier_execution_identity,
+        )
         assert chain.receipt_value is not None
         self.assertEqual(chain.receipt_value.receipt_type, "terminal")
 
@@ -175,6 +181,37 @@ class M3IntegrationTests(unittest.TestCase):
         self.assertEqual(state.result, chain.result_value)
         self.assertEqual(state.verification, chain.verification_value)
         self.assertIsNone(state.receipt)
+
+    def test_verifier_nonzero_exit_is_a_typed_driver_failure(self) -> None:
+        run_one_task_module = importlib.import_module("execution.run_one_task")
+        fake_subprocess = mock.Mock()
+        fake_subprocess.CalledProcessError = subprocess.CalledProcessError
+        fake_subprocess.run.side_effect = subprocess.CalledProcessError(
+            17, ["stub-verifier-cli"]
+        )
+
+        with mock.patch.object(
+            run_one_task_module, "subprocess", fake_subprocess
+        ):
+            with self.assertRaises(VerifierSubprocessError):
+                self._run_one_task(self._expected_output_digest())
+
+    def test_verifier_malformed_stdout_is_a_typed_driver_failure(self) -> None:
+        run_one_task_module = importlib.import_module("execution.run_one_task")
+        fake_subprocess = mock.Mock()
+        fake_subprocess.CalledProcessError = subprocess.CalledProcessError
+        fake_subprocess.run.return_value = subprocess.CompletedProcess(
+            args=["stub-verifier-cli"],
+            returncode=0,
+            stdout="not-json",
+            stderr="",
+        )
+
+        with mock.patch.object(
+            run_one_task_module, "subprocess", fake_subprocess
+        ):
+            with self.assertRaises(VerifierSubprocessError):
+                self._run_one_task(self._expected_output_digest())
 
 
 if __name__ == "__main__":

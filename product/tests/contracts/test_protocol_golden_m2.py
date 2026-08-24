@@ -16,8 +16,10 @@ from kernel.protocol import (
     verify_binding,
 )
 from kernel.protocol_v1 import (
+    RESULT_SNAPSHOT_EVIDENCE_CLASS,
     AttemptPacketV1,
     CoverageEntryV1,
+    FindingV1,
     ReceiptV1,
     ResultV1,
     RuntimeObservationV1,
@@ -179,6 +181,10 @@ class GoldenM2VectorTests(unittest.TestCase):
         reordered = VerificationV1(
             result=verification.result,
             verifier_identity=verification.verifier_identity,
+            verifier_runtime_capability_profile_identity=(
+                verification.verifier_runtime_capability_profile_identity
+            ),
+            verifier_execution_identity=verification.verifier_execution_identity,
             coverage=tuple(reversed(verification.coverage)),
             verdict=verification.verdict,
             findings=verification.findings,
@@ -227,6 +233,7 @@ class GoldenM2VectorTests(unittest.TestCase):
             observation=RuntimeObservationV1(
                 runtime_identity=result.observation.runtime_identity,
                 output_snapshot_digest="sha256:agent-platform-json-v1:" + "9" * 64,
+                execution_identity=result.observation.execution_identity,
             ),
         )
         self.assertNotEqual(result_base, result_v1_content_digest(changed_output))
@@ -236,16 +243,34 @@ class GoldenM2VectorTests(unittest.TestCase):
         changed_verdict = VerificationV1(
             result=verification.result,
             verifier_identity=verification.verifier_identity,
+            verifier_runtime_capability_profile_identity=(
+                verification.verifier_runtime_capability_profile_identity
+            ),
+            verifier_execution_identity=verification.verifier_execution_identity,
             coverage=(
                 CoverageEntryV1(
                     criterion=verification.coverage[0].criterion,
                     status="UNSATISFIED",
                     evidence_digest=None,
+                    evidence_class=RESULT_SNAPSHOT_EVIDENCE_CLASS,
                 ),
                 *verification.coverage[1:],
             ),
             verdict="FAIL",
-            findings=("Digest mismatch",),
+            findings=(
+                FindingV1(
+                    criterion=verification.coverage[0].criterion,
+                    fingerprint=content_digest(
+                        {
+                            "criterion": verification.coverage[0].criterion,
+                            "description": "Digest mismatch",
+                        }
+                    ),
+                    description="Digest mismatch",
+                    state="OPEN",
+                    predecessor=None,
+                ),
+            ),
         )
         self.assertNotEqual(
             verification_base, verification_v1_content_digest(changed_verdict)
@@ -403,6 +428,7 @@ class StaleSubstitutedBindingM2Tests(unittest.TestCase):
                 observation=RuntimeObservationV1(
                     runtime_identity="stub-host-m2-amended",
                     output_snapshot_digest=result.observation.output_snapshot_digest,
+                    execution_identity=result.observation.execution_identity,
                 ),
             )
         )

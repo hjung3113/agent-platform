@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 
+from kernel.canonical import content_digest
 from kernel.protocol import (
     ProtocolRejectionCode,
     RecordRef,
@@ -10,8 +11,10 @@ from kernel.protocol import (
     verify_binding,
 )
 from kernel.protocol_v1 import (
+    RESULT_SNAPSHOT_EVIDENCE_CLASS,
     AttemptPacketV1,
     CoverageEntryV1,
+    FindingV1,
     ReceiptV1,
     ResultV1,
     RuntimeObservationV1,
@@ -32,6 +35,9 @@ RESULT_DIGEST = "sha256:agent-platform-json-v1:" + "c" * 64
 VERIFICATION_DIGEST = "sha256:agent-platform-json-v1:" + "d" * 64
 OUTPUT_SNAPSHOT_DIGEST = "sha256:agent-platform-json-v1:" + "e" * 64
 OTHER_SNAPSHOT_DIGEST = "sha256:agent-platform-json-v1:" + "0" * 64
+VERIFIER_PROFILE_DIGEST = "sha256:agent-platform-json-v1:" + "f" * 64
+EXECUTION_IDENTITY_DIGEST = "sha256:agent-platform-json-v1:" + "1" * 64
+VERIFIER_EXECUTION_IDENTITY_DIGEST = "sha256:agent-platform-json-v1:" + "2" * 64
 
 
 def attempt_envelope(payload: object) -> dict:
@@ -47,6 +53,15 @@ def result_envelope(payload: object) -> dict:
     return {
         "contract_kind": "result",
         "protocol_version": 1,
+        "schema_version": 2,
+        "payload": payload,
+    }
+
+
+def legacy_result_envelope(payload: object) -> dict:
+    return {
+        "contract_kind": "result",
+        "protocol_version": 1,
         "schema_version": 1,
         "payload": payload,
     }
@@ -56,7 +71,16 @@ def verification_envelope(payload: object) -> dict:
     return {
         "contract_kind": "verification",
         "protocol_version": 1,
-        "schema_version": 1,
+        "schema_version": 3,
+        "payload": payload,
+    }
+
+
+def round_one_verification_envelope(payload: object) -> dict:
+    return {
+        "contract_kind": "verification",
+        "protocol_version": 1,
+        "schema_version": 2,
         "payload": payload,
     }
 
@@ -96,6 +120,7 @@ def valid_result_payload() -> dict:
         "observation": {
             "runtime_identity": "runtime-1",
             "output_snapshot_digest": OUTPUT_SNAPSHOT_DIGEST,
+            "execution_identity": EXECUTION_IDENTITY_DIGEST,
         },
     }
 
@@ -105,7 +130,46 @@ def satisfied_entry(criterion: str = "Criterion one") -> dict:
         "criterion": criterion,
         "status": "SATISFIED",
         "evidence_digest": OUTPUT_SNAPSHOT_DIGEST,
+        "evidence_class": RESULT_SNAPSHOT_EVIDENCE_CLASS,
     }
+
+
+def finding_payload(
+    criterion: str,
+    description: str | None = None,
+    *,
+    state: str = "OPEN",
+    predecessor: dict | None = None,
+) -> dict:
+    description = description or f"criterion unsatisfied: {criterion}"
+    return {
+        "criterion": criterion,
+        "fingerprint": content_digest(
+            {"criterion": criterion, "description": description}
+        ),
+        "description": description,
+        "state": state,
+        "predecessor": predecessor,
+    }
+
+
+def finding_value(
+    criterion: str,
+    description: str | None = None,
+    *,
+    state: str = "OPEN",
+    predecessor: RecordRef | None = None,
+) -> FindingV1:
+    description = description or f"criterion unsatisfied: {criterion}"
+    return FindingV1(
+        criterion=criterion,
+        fingerprint=content_digest(
+            {"criterion": criterion, "description": description}
+        ),
+        description=description,
+        state=state,
+        predecessor=predecessor,
+    )
 
 
 def valid_verification_payload() -> dict:
@@ -116,12 +180,64 @@ def valid_verification_payload() -> dict:
             "content_digest": RESULT_DIGEST,
         },
         "verifier_identity": "verifier-1",
+        "verifier_runtime_capability_profile_identity": VERIFIER_PROFILE_DIGEST,
+        "verifier_execution_identity": VERIFIER_EXECUTION_IDENTITY_DIGEST,
         "coverage": [
             satisfied_entry("Criterion one"),
             satisfied_entry("Criterion two"),
         ],
         "verdict": "PASS",
         "findings": [],
+    }
+
+
+def round_one_verification_payload() -> dict:
+    payload = valid_verification_payload()
+    del payload["verifier_execution_identity"]
+    return payload
+
+
+def legacy_verification_envelope(payload: object) -> dict:
+    return {
+        "contract_kind": "verification",
+        "protocol_version": 1,
+        "schema_version": 1,
+        "payload": payload,
+    }
+
+
+def legacy_verification_payload() -> dict:
+    return {
+        "result": {
+            "contract_kind": "result",
+            "record_id": "rec-result-legacy",
+            "content_digest": RESULT_DIGEST,
+        },
+        "verifier_identity": "legacy-verifier",
+        "coverage": [
+            {
+                "criterion": "Legacy criterion",
+                "status": "SATISFIED",
+                "evidence_digest": OUTPUT_SNAPSHOT_DIGEST,
+            }
+        ],
+        "verdict": "PASS",
+        "findings": [],
+    }
+
+
+def legacy_result_payload() -> dict:
+    return {
+        "attempt": {
+            "contract_kind": "attempt_packet",
+            "record_id": "rec-attempt-legacy",
+            "content_digest": ATTEMPT_PACKET_DIGEST,
+        },
+        "output_snapshot_digest": OUTPUT_SNAPSHOT_DIGEST,
+        "observation": {
+            "runtime_identity": "legacy-runtime",
+            "output_snapshot_digest": OUTPUT_SNAPSHOT_DIGEST,
+        },
     }
 
 
@@ -178,6 +294,7 @@ def expected_result() -> ResultV1:
         observation=RuntimeObservationV1(
             runtime_identity="runtime-1",
             output_snapshot_digest=OUTPUT_SNAPSHOT_DIGEST,
+            execution_identity=EXECUTION_IDENTITY_DIGEST,
         ),
     )
 
@@ -190,16 +307,20 @@ def expected_verification() -> VerificationV1:
             content_digest=RESULT_DIGEST,
         ),
         verifier_identity="verifier-1",
+        verifier_runtime_capability_profile_identity=VERIFIER_PROFILE_DIGEST,
+        verifier_execution_identity=VERIFIER_EXECUTION_IDENTITY_DIGEST,
         coverage=(
             CoverageEntryV1(
                 criterion="Criterion one",
                 status="SATISFIED",
                 evidence_digest=OUTPUT_SNAPSHOT_DIGEST,
+                evidence_class=RESULT_SNAPSHOT_EVIDENCE_CLASS,
             ),
             CoverageEntryV1(
                 criterion="Criterion two",
                 status="SATISFIED",
                 evidence_digest=OUTPUT_SNAPSHOT_DIGEST,
+                evidence_class=RESULT_SNAPSHOT_EVIDENCE_CLASS,
             ),
         ),
         verdict="PASS",
@@ -373,6 +494,31 @@ class ResultV1Tests(unittest.TestCase):
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
         )
 
+    def test_execution_identity_requires_content_digest_shape(self) -> None:
+        for identity in ("", "execution@1", "not-a-digest", None, 1):
+            payload = valid_result_payload()
+            payload["observation"]["execution_identity"] = identity
+            self.assertEqual(
+                read_result(payload).rejection_code,
+                ProtocolRejectionCode.MALFORMED_PAYLOAD,
+                repr(identity),
+            )
+
+    def test_schema_one_legacy_result_remains_readable(self) -> None:
+        result = read_candidate(legacy_result_envelope(legacy_result_payload()))
+        self.assertTrue(result.ok, result.reason)
+        self.assertEqual(result.value.value.output_snapshot_digest, OUTPUT_SNAPSHOT_DIGEST)
+        self.assertFalse(hasattr(result.value.value.observation, "execution_identity"))
+
+    def test_schema_one_result_with_v2_fields_rejects_unsupported(self) -> None:
+        payload = legacy_result_payload()
+        payload["observation"]["execution_identity"] = EXECUTION_IDENTITY_DIGEST
+        result = read_candidate(legacy_result_envelope(payload))
+        self.assertEqual(
+            result.rejection_code,
+            ProtocolRejectionCode.UNSUPPORTED_SCHEMA_VERSION,
+        )
+
     def test_output_snapshot_digest_not_content_digest_shaped_rejects(self) -> None:
         payload = valid_result_payload()
         payload["output_snapshot_digest"] = "not-a-digest"
@@ -409,6 +555,7 @@ class ResultV1Tests(unittest.TestCase):
             observation=RuntimeObservationV1(
                 runtime_identity="runtime-2",
                 output_snapshot_digest=result.output_snapshot_digest,
+                execution_identity=result.observation.execution_identity,
             ),
         )
         self.assertNotEqual(
@@ -438,7 +585,15 @@ class VerificationV1Tests(unittest.TestCase):
         self.assertEqual(second.value.value, first.value.value)
 
     def test_missing_or_unknown_payload_fields_reject(self) -> None:
-        for field in ("result", "verifier_identity", "coverage", "verdict", "findings"):
+        for field in (
+            "result",
+            "verifier_identity",
+            "verifier_runtime_capability_profile_identity",
+            "verifier_execution_identity",
+            "coverage",
+            "verdict",
+            "findings",
+        ):
             payload = valid_verification_payload()
             del payload[field]
             self.assertEqual(
@@ -519,6 +674,26 @@ class VerificationV1Tests(unittest.TestCase):
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
         )
 
+    def test_evidence_class_requires_versioned_identity_shape(self) -> None:
+        for evidence_class in ("", "result_snapshot_digest_equality", "not@", None, 1):
+            payload = valid_verification_payload()
+            payload["coverage"][0]["evidence_class"] = evidence_class
+            self.assertEqual(
+                read_verification(payload).rejection_code,
+                ProtocolRejectionCode.MALFORMED_PAYLOAD,
+                repr(evidence_class),
+            )
+
+    def test_verifier_profile_identity_requires_content_digest_shape(self) -> None:
+        for identity in ("runtime@1", "not-a-digest", "", None, 1):
+            payload = valid_verification_payload()
+            payload["verifier_runtime_capability_profile_identity"] = identity
+            self.assertEqual(
+                read_verification(payload).rejection_code,
+                ProtocolRejectionCode.MALFORMED_PAYLOAD,
+                repr(identity),
+            )
+
     def test_declared_verdict_inconsistent_with_coverage_rejects(self) -> None:
         all_satisfied = valid_verification_payload()
         all_satisfied["verdict"] = "FAIL"
@@ -566,7 +741,9 @@ class VerificationV1Tests(unittest.TestCase):
         blocked["coverage"][0]["status"] = "BLOCKED"
         blocked["coverage"][0]["evidence_digest"] = None
         blocked["verdict"] = "BLOCKED"
-        blocked["findings"] = ["Criterion one could not be evaluated"]
+        blocked["findings"] = [
+            finding_payload("Criterion one", "Criterion one could not be evaluated")
+        ]
         self.assertTrue(read_verification(blocked).ok, read_verification(blocked).reason)
 
         unproven_mix = valid_verification_payload()
@@ -575,14 +752,17 @@ class VerificationV1Tests(unittest.TestCase):
         unproven_mix["coverage"][1]["status"] = "UNPROVEN"
         unproven_mix["coverage"][1]["evidence_digest"] = None
         unproven_mix["verdict"] = "FAIL"
-        unproven_mix["findings"] = ["Digest mismatch", "No evidence observed"]
+        unproven_mix["findings"] = [
+            finding_payload("Criterion one", "Digest mismatch"),
+            finding_payload("Criterion two", "No evidence observed"),
+        ]
         self.assertTrue(
             read_verification(unproven_mix).ok, read_verification(unproven_mix).reason
         )
 
     def test_findings_nonempty_with_pass_verdict_rejects(self) -> None:
         payload = valid_verification_payload()
-        payload["findings"] = ["should not be here on a PASS verdict"]
+        payload["findings"] = [finding_payload("Criterion one")]
         self.assertEqual(
             read_verification(payload).rejection_code,
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
@@ -595,11 +775,88 @@ class VerificationV1Tests(unittest.TestCase):
             read_verification(payload).rejection_code,
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
         )
+
+    def test_legacy_finding_shape_under_v2_rejects(self) -> None:
+        payload = valid_verification_payload()
+        payload["findings"] = ["legacy prose finding"]
+        payload["coverage"][0]["status"] = "UNSATISFIED"
+        payload["coverage"][0]["evidence_digest"] = None
+        payload["verdict"] = "FAIL"
+        self.assertEqual(
+            read_verification(payload).rejection_code,
+            ProtocolRejectionCode.MALFORMED_PAYLOAD,
+        )
+
+    def test_finding_fingerprint_and_lifecycle_shape_rejects(self) -> None:
+        malformed_fingerprint = valid_verification_payload()
+        malformed_fingerprint["coverage"][0]["status"] = "UNSATISFIED"
+        malformed_fingerprint["coverage"][0]["evidence_digest"] = None
+        malformed_fingerprint["verdict"] = "FAIL"
+        malformed_fingerprint["findings"] = [finding_payload("Criterion one")]
+        malformed_fingerprint["findings"][0]["fingerprint"] = VERIFICATION_DIGEST
+        self.assertEqual(
+            read_verification(malformed_fingerprint).rejection_code,
+            ProtocolRejectionCode.MALFORMED_PAYLOAD,
+        )
+
+        non_open_without_predecessor = valid_verification_payload()
+        non_open_without_predecessor["coverage"][0]["status"] = "UNSATISFIED"
+        non_open_without_predecessor["coverage"][0]["evidence_digest"] = None
+        non_open_without_predecessor["verdict"] = "FAIL"
+        non_open_without_predecessor["findings"] = [
+            finding_payload("Criterion one", state="RESOLVED")
+        ]
+        self.assertEqual(
+            read_verification(non_open_without_predecessor).rejection_code,
+            ProtocolRejectionCode.MALFORMED_PAYLOAD,
+        )
+
+        open_with_predecessor = valid_verification_payload()
+        open_with_predecessor["coverage"][0]["status"] = "UNSATISFIED"
+        open_with_predecessor["coverage"][0]["evidence_digest"] = None
+        open_with_predecessor["verdict"] = "FAIL"
+        open_with_predecessor["findings"] = [
+            finding_payload(
+                "Criterion one",
+                predecessor={
+                    "contract_kind": "verification",
+                    "record_id": "rec-verification-previous",
+                    "content_digest": VERIFICATION_DIGEST,
+                },
+            )
+        ]
+        self.assertEqual(
+            read_verification(open_with_predecessor).rejection_code,
+            ProtocolRejectionCode.MALFORMED_PAYLOAD,
+        )
         payload = valid_verification_payload()
         payload["findings"] = ("a finding",)
         self.assertEqual(
             read_verification(payload).rejection_code,
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
+        )
+
+    def test_resolved_finding_with_predecessor_parses(self) -> None:
+        payload = valid_verification_payload()
+        payload["coverage"][0]["status"] = "UNSATISFIED"
+        payload["coverage"][0]["evidence_digest"] = None
+        payload["verdict"] = "FAIL"
+        predecessor = {
+            "contract_kind": "verification",
+            "record_id": "rec-verification-previous",
+            "content_digest": VERIFICATION_DIGEST,
+        }
+        payload["findings"] = [
+            finding_payload(
+                "Criterion one", state="RESOLVED", predecessor=predecessor
+            )
+        ]
+        result = read_verification(payload)
+        self.assertTrue(result.ok, result.reason)
+        self.assertEqual(result.value.value.findings[0].state, "RESOLVED")
+        self.assertEqual(
+            result.value.value.findings[0].predecessor.record_id,
+            "rec-verification-previous",
         )
 
     def test_parent_kind_other_than_result_rejects(self) -> None:
@@ -623,11 +880,12 @@ class VerificationV1Tests(unittest.TestCase):
                     criterion=verification.coverage[0].criterion,
                     status="UNSATISFIED",
                     evidence_digest=None,
+                    evidence_class=RESULT_SNAPSHOT_EVIDENCE_CLASS,
                 ),
                 verification.coverage[1],
             ),
             verdict="FAIL",
-            findings=("Digest mismatch",),
+            findings=(finding_value("Criterion one", "Digest mismatch"),),
         )
         self.assertNotEqual(
             verification_v1_content_digest(verification),
@@ -656,6 +914,53 @@ class VerificationV1Tests(unittest.TestCase):
         self.assertEqual(
             parsed.envelope.content_digest(),
             verification_v1_content_digest(parsed.value),
+        )
+
+
+class VerificationSchemaDispatchTests(unittest.TestCase):
+    def test_schema_one_legacy_verification_remains_readable(self) -> None:
+        result = read_candidate(legacy_verification_envelope(legacy_verification_payload()))
+        self.assertTrue(result.ok, result.reason)
+        self.assertEqual(result.value.value.verdict, "PASS")
+        self.assertEqual(result.value.value.findings, ())
+        self.assertEqual(result.value.value.coverage[0].criterion, "Legacy criterion")
+
+    def test_schema_two_stale_legacy_payload_rejects(self) -> None:
+        envelope = legacy_verification_envelope(legacy_verification_payload())
+        envelope["schema_version"] = 2
+        result = read_candidate(envelope)
+        self.assertEqual(
+            result.rejection_code,
+            ProtocolRejectionCode.MALFORMED_PAYLOAD,
+        )
+
+    def test_round_one_schema_two_verification_remains_readable(self) -> None:
+        result = read_candidate(
+            round_one_verification_envelope(round_one_verification_payload())
+        )
+        self.assertTrue(result.ok, result.reason)
+        self.assertEqual(result.value.value.verdict, "PASS")
+        self.assertEqual(result.value.value.findings, ())
+        self.assertFalse(hasattr(result.value.value, "verifier_execution_identity"))
+
+    def test_schema_one_candidate_with_v2_fields_rejects_unsupported(self) -> None:
+        payload = legacy_verification_payload()
+        payload["verifier_runtime_capability_profile_identity"] = VERIFIER_PROFILE_DIGEST
+        result = read_candidate(legacy_verification_envelope(payload))
+        self.assertEqual(
+            result.rejection_code,
+            ProtocolRejectionCode.UNSUPPORTED_SCHEMA_VERSION,
+        )
+
+    def test_schema_one_candidate_with_verifier_execution_identity_rejects_unsupported(
+        self,
+    ) -> None:
+        payload = legacy_verification_payload()
+        payload["verifier_execution_identity"] = VERIFIER_EXECUTION_IDENTITY_DIGEST
+        result = read_candidate(legacy_verification_envelope(payload))
+        self.assertEqual(
+            result.rejection_code,
+            ProtocolRejectionCode.UNSUPPORTED_SCHEMA_VERSION,
         )
 
 
@@ -765,6 +1070,7 @@ class DirectReaderRejectionTests(unittest.TestCase):
                     "observation": {
                         "runtime_identity": "runtime-1",
                         "output_snapshot_digest": OTHER_SNAPSHOT_DIGEST,
+                        "execution_identity": EXECUTION_IDENTITY_DIGEST,
                     },
                 }
             )
@@ -777,6 +1083,8 @@ class DirectReaderRejectionTests(unittest.TestCase):
                         "content_digest": RESULT_DIGEST,
                     },
                     "verifier_identity": "verifier-1",
+                    "verifier_runtime_capability_profile_identity": VERIFIER_PROFILE_DIGEST,
+                    "verifier_execution_identity": VERIFIER_EXECUTION_IDENTITY_DIGEST,
                     "coverage": [],
                     "verdict": "PASS",
                     "findings": [],

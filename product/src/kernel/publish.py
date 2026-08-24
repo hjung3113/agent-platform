@@ -23,6 +23,7 @@ import json
 import os
 import re
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -45,13 +46,14 @@ from kernel.protocol import (
 )
 from kernel.protocol_v1 import (
     PROTOCOL_VERSION,
-    SCHEMA_VERSION,
     AttemptPacketV1,
     ReceiptV1,
     RequestV1,
     ResultV1,
+    RESULT_SNAPSHOT_EVIDENCE_CLASS,
     VerificationV1,
     WorkflowRevisionV1,
+    schema_version_for_kind,
 )
 
 _RECORD_FILENAME = re.compile(r"^(\d{10})\.json$")
@@ -101,8 +103,10 @@ class PublishRejectionCode(StrEnum):
     )
     LOCK_CONTENTION_TIMEOUT = "lock_contention_timeout"
     RUN_ALREADY_TERMINAL = "run_already_terminal"
+    STALE_SCHEMA_VERSION = "stale_schema_version"
     ATTEMPT_TASK_BINDING_MISMATCH = "attempt_task_binding_mismatch"
     RESULT_ATTEMPT_BINDING_MISMATCH = "result_attempt_binding_mismatch"
+    RESULT_ENVIRONMENT_BINDING_MISMATCH = "result_environment_binding_mismatch"
     VERIFICATION_RESULT_BINDING_MISMATCH = (
         "verification_result_binding_mismatch"
     )
@@ -164,7 +168,7 @@ def _candidate_content(
     return {
         "contract_kind": contract_kind.value,
         "protocol_version": PROTOCOL_VERSION,
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version_for_kind(contract_kind),
         "payload": candidate.canonical_payload,
     }
 
@@ -340,12 +344,22 @@ def _kind_binding_rejection(
             )
         return None
     if kind == ContractKind.RESULT.value:
-        attempt_ref, _ = _committed_contract(run, ContractKind.ATTEMPT_PACKET)
+        attempt_ref, attempt_value = _committed_contract(
+            run, ContractKind.ATTEMPT_PACKET
+        )
         binding = verify_binding(value.attempt, attempt_ref)
         if not binding.ok:
             return Rejected(
                 PublishRejectionCode.RESULT_ATTEMPT_BINDING_MISMATCH,
                 f"binding_failure={binding.rejection_code}:{binding.reason}",
+            )
+        if (
+            value.observation.runtime_identity
+            != attempt_value.runtime_capability_profile_identity
+        ):
+            return Rejected(
+                PublishRejectionCode.RESULT_ENVIRONMENT_BINDING_MISMATCH,
+                "result_observation_runtime_identity_does_not_match_attempt_profile",
             )
         return None
     if kind == ContractKind.VERIFICATION.value:
@@ -366,17 +380,55 @@ def _kind_binding_rejection(
         for entry in value.coverage:
             if (
                 entry.status == "SATISFIED"
+                and entry.evidence_class != RESULT_SNAPSHOT_EVIDENCE_CLASS
+            ):
+                return Rejected(
+                    PublishRejectionCode.VERIFICATION_COVERAGE_MISMATCH,
+                    f"evidence_class_mismatch_criterion={entry.criterion!r}",
+                )
+            if (
+                entry.status == "SATISFIED"
                 and entry.evidence_digest != result_value.output_snapshot_digest
             ):
                 return Rejected(
                     PublishRejectionCode.VERIFICATION_COVERAGE_MISMATCH,
                     f"evidence_digest_mismatch_criterion={entry.criterion!r}",
                 )
+        non_satisfied_counts = Counter(
+            entry.criterion
+            for entry in value.coverage
+            if entry.status != "SATISFIED"
+        )
+        finding_counts = Counter(finding.criterion for finding in value.findings)
+        if finding_counts != non_satisfied_counts:
+            return Rejected(
+                PublishRejectionCode.VERIFICATION_COVERAGE_MISMATCH,
+                "non_satisfied_coverage_finding_counts_mismatch",
+            )
+        for finding in value.findings:
+            if finding.state != "OPEN" or finding.predecessor is not None:
+                return Rejected(
+                    PublishRejectionCode.VERIFICATION_COVERAGE_MISMATCH,
+                    f"finding_not_open_without_predecessor={finding.criterion!r}",
+                )
         _, attempt_value = _committed_contract(run, ContractKind.ATTEMPT_PACKET)
         if value.verifier_identity == attempt_value.implementer_identity:
             return Rejected(
                 PublishRejectionCode.SELF_VERIFICATION_REJECTED,
                 f"verifier_identity={value.verifier_identity!r}",
+            )
+        result_execution_identity = getattr(
+            result_value.observation, "execution_identity", None
+        )
+        if result_execution_identity is None:
+            return Rejected(
+                PublishRejectionCode.SELF_VERIFICATION_REJECTED,
+                "result_observation_execution_identity_missing",
+            )
+        if value.verifier_execution_identity == result_execution_identity:
+            return Rejected(
+                PublishRejectionCode.SELF_VERIFICATION_REJECTED,
+                "verifier_execution_identity_matches_result_execution_identity",
             )
         return None
     if kind == ContractKind.RECEIPT.value:
@@ -620,6 +672,13 @@ def _publish_locked(
         )
 
     candidate_kind = content["contract_kind"]
+    current_schema_version = schema_version_for_kind(ContractKind(candidate_kind))
+    if content["schema_version"] != current_schema_version:
+        return Rejected(
+            PublishRejectionCode.STALE_SCHEMA_VERSION,
+            f"candidate_schema_version={content['schema_version']} "
+            f"current_schema_version={current_schema_version}",
+        )
     expected_kind = _next_kind(head_kind)
     if candidate_kind != expected_kind.value:
         return Rejected(

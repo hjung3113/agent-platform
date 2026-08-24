@@ -23,6 +23,9 @@ from typing import Any, Iterator
 from kernel.canonical import content_digest
 from kernel.protocol import RecordRef, read_candidate
 from kernel.protocol_v1 import (
+    _LegacyVerificationV1,
+    _LegacyVerificationV1RoundOne,
+    _LegacyResultV1,
     AttemptPacketV1,
     ReceiptV1,
     RequestV1,
@@ -43,8 +46,10 @@ class RunState:
     last_sequence: int
     last_record_id: RecordRef | None
     attempt_packet: AttemptPacketV1 | None = None
-    result: ResultV1 | None = None
-    verification: VerificationV1 | None = None
+    result: ResultV1 | _LegacyResultV1 | None = None
+    verification: (
+        VerificationV1 | _LegacyVerificationV1 | _LegacyVerificationV1RoundOne | None
+    ) = None
     receipt: ReceiptV1 | None = None
 
     @property
@@ -110,8 +115,10 @@ def replay(state_dir: str, run_id: str) -> RunState:
     last_sequence = 0
     last_record_id: RecordRef | None = None
     attempt_packet: AttemptPacketV1 | None = None
-    result_value: ResultV1 | None = None
-    verification: VerificationV1 | None = None
+    result_value: ResultV1 | _LegacyResultV1 | None = None
+    verification: (
+        VerificationV1 | _LegacyVerificationV1 | _LegacyVerificationV1RoundOne | None
+    ) = None
     receipt: ReceiptV1 | None = None
 
     if not run_dir.is_dir():
@@ -165,9 +172,12 @@ def replay(state_dir: str, run_id: str) -> RunState:
             workflow_revision = value
         elif isinstance(value, AttemptPacketV1):
             attempt_packet = value
-        elif isinstance(value, ResultV1):
+        elif isinstance(value, (ResultV1, _LegacyResultV1)):
             result_value = value
-        elif isinstance(value, VerificationV1):
+        elif isinstance(
+            value,
+            (VerificationV1, _LegacyVerificationV1, _LegacyVerificationV1RoundOne),
+        ):
             verification = value
         elif isinstance(value, ReceiptV1):
             receipt = value

@@ -50,6 +50,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from kernel import admission
@@ -363,6 +364,12 @@ def execute(
         capture_output=True,
         check=False,
     )
+    execution_identity = content_digest(
+        {
+            "spawned_at_ns": str(time.time_ns()),
+            "nonce": os.urandom(16).hex(),
+        }
+    )
 
     if completed.returncode != 0:
         raise RuntimeExecutionFailedError(
@@ -402,7 +409,8 @@ def execute(
         attempt=attempt_ref,
         output_snapshot_digest=output_snapshot_digest,
         observation=RuntimeObservationV1(
-            runtime_identity=profile.runtime,
+            runtime_identity=profile.identity,
             output_snapshot_digest=output_snapshot_digest,
+            execution_identity=execution_identity,
         ),
     )

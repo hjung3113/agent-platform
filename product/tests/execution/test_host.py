@@ -11,7 +11,12 @@ from typing import Any
 from unittest import mock
 
 from kernel import admission
-from kernel.protocol import ParsedCandidate, RecordRef, read_candidate
+from kernel.protocol import (
+    ParsedCandidate,
+    RecordRef,
+    is_content_digest,
+    read_candidate,
+)
 from kernel.protocol_v1 import (
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
@@ -253,7 +258,10 @@ class HostExecuteTest(unittest.TestCase):
             )
 
         self.assertEqual(result.attempt, attempt_ref)
-        self.assertTrue(result.observation.runtime_identity.startswith(f"opencode@{FAKE_VERSION}+"))
+        self.assertEqual(
+            result.observation.runtime_identity,
+            attempt.runtime_capability_profile_identity,
+        )
         self.assertEqual(
             result.output_snapshot_digest,
             snapshot_identity(self.root, declared).digest,
@@ -269,6 +277,37 @@ class HostExecuteTest(unittest.TestCase):
         self.assertIn(TASK.objective, report["message"])
         for criterion in TASK.acceptance_criteria:
             self.assertIn(criterion, report["message"])
+
+    def test_each_spawn_produces_a_fresh_execution_identity(self) -> None:
+        (self.root / DIRECTIVE_NAME).write_text("noop\n", encoding="utf-8")
+        attempt_ref, attempt = self._real_attempt()
+
+        with self._no_required_capabilities():
+            first = execute(
+                attempt_ref,
+                attempt,
+                self.root,
+                str(FIXTURE_BINARY),
+                TASK,
+                self.state,
+                self.run_id,
+            )
+            second = execute(
+                attempt_ref,
+                attempt,
+                self.root,
+                str(FIXTURE_BINARY),
+                TASK,
+                self.state,
+                self.run_id,
+            )
+
+        self.assertTrue(is_content_digest(first.observation.execution_identity))
+        self.assertTrue(is_content_digest(second.observation.execution_identity))
+        self.assertNotEqual(
+            first.observation.execution_identity,
+            second.observation.execution_identity,
+        )
 
     def test_runtime_nonzero_exit_raises_instead_of_producing_a_result(self) -> None:
         """PR review: a genuinely failed run must not silently produce a

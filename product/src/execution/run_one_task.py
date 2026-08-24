@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kernel.protocol import ParsedCandidate, RecordRef, read_candidate
+from kernel.protocol import ContractKind, ParsedCandidate, RecordRef, read_candidate
 from kernel.protocol_v1 import (
     PROTOCOL_VERSION,
-    SCHEMA_VERSION,
     AttemptPacketV1,
     ReceiptV1,
     RequestV1,
@@ -17,6 +20,7 @@ from kernel.protocol_v1 import (
     TaskV1,
     VerificationV1,
     WorkflowRevisionV1,
+    schema_version_for_kind,
 )
 from kernel.publish import Published, Rejected, publish
 
@@ -24,7 +28,12 @@ from execution import host
 from execution.attempt import build_attempt_packet, build_receipt
 from execution.context_compiler import compile_context_pack, disclosure_identity
 from execution.context_evidence import write_context_evidence
-from verification.stub_verifier import stub_verify
+
+_VERIFIER_DIAGNOSTIC_LIMIT = 4096
+
+
+class VerifierSubprocessError(Exception):
+    """The verifier child failed or did not emit a valid Verification."""
 
 
 @dataclass(frozen=True)
@@ -77,7 +86,7 @@ def _as_candidate(contract_kind: str, typed: Any) -> ParsedCandidate:
         {
             "contract_kind": contract_kind,
             "protocol_version": PROTOCOL_VERSION,
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": schema_version_for_kind(ContractKind(contract_kind)),
             "payload": typed.to_canonical_value(),
         }
     )
@@ -97,6 +106,111 @@ def _require_published(step: str, result: Published | Rejected) -> Published:
             f"unexpected publish rejection at step {step}: {result.code}"
         )
     return result
+
+
+def _truncate_verifier_diagnostic(value: object) -> str:
+    rendered = "<none>" if value is None else str(value)
+    if len(rendered) <= _VERIFIER_DIAGNOSTIC_LIMIT:
+        return rendered
+    return rendered[:_VERIFIER_DIAGNOSTIC_LIMIT] + "...<truncated>"
+
+
+def _verifier_subprocess_error(
+    reason: str,
+    *,
+    command: object,
+    stdout: object,
+    stderr: object,
+) -> VerifierSubprocessError:
+    return VerifierSubprocessError(
+        f"{reason}; cmd={command!r}; "
+        f"stdout={_truncate_verifier_diagnostic(stdout)!r}; "
+        f"stderr={_truncate_verifier_diagnostic(stderr)!r}"
+    )
+
+
+def _run_verifier_subprocess(
+    *,
+    result_ref: RecordRef,
+    result_output_snapshot_digest: str,
+    task: TaskV1,
+    verifier_identity: str,
+    expected_output_digest: str,
+    opencode_binary_path: str,
+    config_paths: tuple[Path, ...],
+) -> VerificationV1:
+    input_payload = {
+        "result_ref": result_ref.to_canonical_value(),
+        "result_output_snapshot_digest": result_output_snapshot_digest,
+        "task": task.to_canonical_value(),
+        "verifier_identity": verifier_identity,
+        "expected_output_digest": expected_output_digest,
+        "opencode_binary_path": opencode_binary_path,
+        "config_paths": [str(path) for path in config_paths],
+    }
+    command = [sys.executable, "-m", "verification.stub_verifier_cli"]
+    child_environment = os.environ.copy()
+    src_root = str(Path(__file__).resolve().parents[1])
+    existing_pythonpath = child_environment.get("PYTHONPATH")
+    child_environment["PYTHONPATH"] = os.pathsep.join(
+        path for path in (src_root, existing_pythonpath) if path
+    )
+    try:
+        completed = subprocess.run(
+            command,
+            input=json.dumps(input_payload),
+            capture_output=True,
+            check=True,
+            text=True,
+            env=child_environment,
+        )
+    except subprocess.CalledProcessError as error:
+        raise _verifier_subprocess_error(
+            f"verifier_subprocess_failed_returncode={error.returncode}",
+            command=error.cmd,
+            stdout=error.stdout,
+            stderr=error.stderr,
+        ) from error
+    except OSError as error:
+        raise _verifier_subprocess_error(
+            f"verifier_subprocess_spawn_failed={error}",
+            command=command,
+            stdout=None,
+            stderr=str(error),
+        ) from error
+
+    try:
+        payload = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise _verifier_subprocess_error(
+            "verifier_stdout_malformed",
+            command=command,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        ) from error
+    parsed = read_candidate(
+        {
+            "contract_kind": ContractKind.VERIFICATION.value,
+            "protocol_version": PROTOCOL_VERSION,
+            "schema_version": schema_version_for_kind(ContractKind.VERIFICATION),
+            "payload": payload,
+        }
+    )
+    if not parsed.ok:
+        raise _verifier_subprocess_error(
+            f"verifier_stdout_rejected={parsed.rejection_code}:{parsed.reason}",
+            command=command,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+    if not isinstance(parsed.value.value, VerificationV1):
+        raise _verifier_subprocess_error(
+            "verifier_stdout_not_verification",
+            command=command,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+    return parsed.value.value
 
 
 def run_one_task(
@@ -225,12 +339,14 @@ def run_one_task(
         ),
     )
 
-    verification_value = stub_verify(
+    verification_value = _run_verifier_subprocess(
         result_ref=result_published.record_ref,
         result_output_snapshot_digest=result_value.output_snapshot_digest,
         task=task,
         verifier_identity=verifier_identity,
         expected_output_digest=expected_output_digest,
+        opencode_binary_path=opencode_binary_path,
+        config_paths=config_paths,
     )
     verification_published = _require_published(
         "verification",
