@@ -1,6 +1,35 @@
 # Handoff
 
-## Completed in this slice (M5 — cross-project failure-mode ledger, research/docs only)
+## Completed in this slice (M6 — verification/evidence hardening, PR open)
+
+M6 implemented per [`docs/plans/active/m6-verification-evidence-hardening.md`](docs/plans/active/m6-verification-evidence-hardening.md),
+tracking [Issue #5](https://github.com/hjung3113/agent-platform/issues/5). **PR not yet
+merged**: [PR #48](https://github.com/hjung3113/agent-platform/pull/48).
+
+- **Plan**: drafted grounded in the real M2–M4 code (not the roadmap's general vocabulary),
+  folding in the 8 M6-tagged findings from the M5 ledger (issue #5 comment 5386949987, worked
+  through individually in the plan's §1.1). Reviewed by `glm-5.3` (effort `high`, via
+  `opencode`, `--auto` — the default sandbox denies writes outside the repo, needed for the
+  reviewer's findings-file output) before any implementation: **2 BLOCKER, 6 HIGH, 4 MEDIUM,
+  3 LOW**, all addressed in the plan (§13) before dispatching implementation — both BLOCKERs
+  were the same class (a check unsatisfiable by any real producer path: the env-binding
+  comparison used two differently-derived identity fields that never agree; the
+  self-verification distinctness check would reject every honest run in this single-runtime,
+  in-process-verifier deployment). The second is now an explicit scope limit (plan §6/§11),
+  not a false guarantee.
+- **Implementation**: dispatched to `codex --model gpt-5.6-luna -c
+  model_reasoning_effort="max"` in an Orca worktree (`hjung3113/m6-verification-evidence-
+  hardening`), ~32 min, one commit (`93acbab`), 19 files, 338 tests green (contracts 140,
+  kernel 102, execution 91, verification 5) + `compileall`, independently re-run outside the
+  implementation worktree before opening the PR. Diff spot-checked against the plan's two
+  BLOCKER fixes (`host.py`'s `runtime_identity=profile.identity`; `publish.py`'s
+  bidirectional Finding-count rule) — matches exactly.
+- **Not yet done**: PR review/merge. No second adversarial review round happened this slice
+  (M3/M4 both had two rounds — draft-review and post-implementation-review; M6 only had the
+  pre-implementation round so far). Next session should do a post-implementation review pass
+  on PR #48 before merging, mirroring M3 §14/M4 §14's precedent, not skip straight to merge.
+
+## Completed earlier (M5 — cross-project failure-mode ledger, research/docs only)
 
 M5 done per [`mvp-implementation-roadmap.md`](docs/plans/active/mvp-implementation-roadmap.md)'s
 M5 section, tracking [Issue #46](https://github.com/hjung3113/agent-platform/issues/46).
@@ -121,25 +150,19 @@ python3.12 -m compileall -q product/src product/tests                           
 - M1 — Kernel authoritative publication and replay spine, PR #41. See prior handoff commits
   for full detail if needed.
 
-## Next session — fixed scope: M6 design, verification/evidence hardening (issue #5)
+## Next session — fixed scope: review and merge PR #48 (M6)
 
-M5→M6 gate fully satisfied (ledger exists, all 4 repos scanned, M6-tagged findings folded
-into [issue #5](https://github.com/hjung3113/agent-platform/issues/5)'s checklist as 8
-concrete adversarial questions). Nothing blocks M6 design start.
-
-M6 itself, per the roadmap: hardened criterion/evidence policy, execution-provenance
-independence, self-verification closed by real distinct identity rather than M2's string
-inequality. M3's real Result/Runtime Observation binding and M4's real Context Pack make this
-possible but do not implement it. Expect a plan doc + adversarial review round + implementation
-DAG, following the M3/M4 pattern (`docs/plans/active/m4-deterministic-context-compiler.md` is
-the most recent, most detailed precedent to imitate — full source/scope/exit-gate/review-log
-structure). **First action next session**: write
-`docs/plans/active/m6-verification-evidence-hardening.md` from the roadmap's M6 section +
-issue #5's full checklist (base questions + the 8 folded ledger findings) + the actual M2/M3/M4
-code on `main` (`kernel/protocol_v1.py`'s `VerificationV1`, whatever currently closes
-self-verification via string inequality, `kernel/lineage_store.py`, `execution/host.py`,
-`execution/context_compiler.py`) — do not start from a blank design, ground every section in
-what the code actually does today, same discipline as M3/M4 §1.
+M6 is designed and implemented (see above); [PR #48](https://github.com/hjung3113/agent-platform/pull/48)
+is open, not merged, and has not had a post-implementation adversarial review round yet — M3
+and M4 both had two review rounds (pre-implementation plan review, then a second pass against
+the real committed diff), and M6 has only had the first so far. **First action next session**:
+run a second review round against PR #48's actual diff (not the plan doc) — same process as
+M3 §14/M4 §14 — before merging, and fold any findings into the plan doc's §14 (create it,
+mirroring M4's §14 stub) and fix them in the PR. Once merged, next scope is M7 (orchestration
+expansion — retry/repair/replan, fan-in, safe parallelism, multi-task DAG, Reviewer/Verifier
+split per ADR-0009), which several of M6's explicit scope limits (plan §11 — genuine
+verifier-environment independence, cross-run Finding lifecycle, stale/flaky/retry evidence)
+are deferred to.
 
 ## Explicit scope limits carried forward from M3/M4 (not gaps to silently close later)
 
