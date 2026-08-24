@@ -24,10 +24,31 @@ merged**: [PR #48](https://github.com/hjung3113/agent-platform/pull/48).
   implementation worktree before opening the PR. Diff spot-checked against the plan's two
   BLOCKER fixes (`host.py`'s `runtime_identity=profile.identity`; `publish.py`'s
   bidirectional Finding-count rule) — matches exactly.
-- **Not yet done**: PR review/merge. No second adversarial review round happened this slice
-  (M3/M4 both had two rounds — draft-review and post-implementation-review; M6 only had the
-  pre-implementation round so far). Next session should do a post-implementation review pass
-  on PR #48 before merging, mirroring M3 §14/M4 §14's precedent, not skip straight to merge.
+- **Round 2 (post-implementation review, this same slice — the M3/M4-style second round did
+  happen, just automated rather than manual):** GitHub's `chatgpt-codex-connector` auto-review
+  on PR #48 found a real P1: round 1's plan §6 had retracted the self-verification
+  execution-distinctness check as unsatisfiable-by-the-honest-path, but
+  `docs/specs/06-review-verification-evidence.md:15` **normatively requires** it — retracting
+  a real spec requirement is a defect, not a legitimate scope limit. Escalated to the user
+  (architecture decision, not unilaterally resolved) — user chose "implement real separation."
+  Corrected design: the verifier now runs as a genuinely separate OS process
+  (`verification/stub_verifier_cli.py`, subprocess-spawned) with a real random per-invocation
+  execution nonce, checked at publish time against a matching real per-spawn nonce now on the
+  Result (`RuntimeObservationV1.execution_identity`, generated around `host.py`'s existing real
+  `subprocess.run` spawn of OpenCode). `ResultV1` bumped to schema v2 with the same
+  legacy-reader-retention pattern round 1 built for `VERIFICATION`. Implementation hit one real
+  mid-build blocker the agent correctly stopped on instead of silently deviating (the nonce
+  payload hashed a raw `time.time_ns()` int, which this repo's canonicalizer rejects outside
+  ±2⁵³) — plan corrected (stringify timestamp, drop an unneeded PID field), agent resumed.
+  Landed as `bab23bb`, 351 tests green (contracts 143, kernel 109, execution 92, verification
+  7) + `compileall`, independently re-verified outside the worktree, diff spot-checked against
+  the corrected design. Pushed to PR #48; PR comment posted explaining the round-2 fix.
+- **Not yet done**: PR #48 merge. Both automated-review rounds (chatgpt-codex-connector on the
+  real diff) are now addressed; no manual `glm-5.3`-style second pass has been run against the
+  final `bab23bb` diff specifically (round 1's `glm-5.3` review was pre-implementation, against
+  the plan doc only). Next session: check PR #48 for any further review activity, decide
+  whether a manual pass against the final diff is still warranted given two real automated
+  rounds already passed, then merge.
 
 ## Completed earlier (M5 — cross-project failure-mode ledger, research/docs only)
 
