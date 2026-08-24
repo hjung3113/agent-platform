@@ -158,7 +158,7 @@ class GoldenVectorTests(unittest.TestCase):
                 "rec-request-9999",
                 revision.request.content_digest,
             ),
-            task=revision.task,
+            tasks=revision.tasks,
         )
         substituted_digest = WorkflowRevisionV1(
             request=RecordRef(
@@ -166,7 +166,7 @@ class GoldenVectorTests(unittest.TestCase):
                 revision.request.record_id,
                 "sha256:agent-platform-json-v1:" + "e" * 64,
             ),
-            task=revision.task,
+            tasks=revision.tasks,
         )
         self.assertNotEqual(
             revision_base, workflow_revision_v1_content_digest(substituted_id)

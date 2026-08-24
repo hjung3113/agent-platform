@@ -6,7 +6,7 @@
     "workflow_revision": {
       "contract_kind": "workflow_revision",
       "record_id": "rec-workflow-0001",
-      "content_digest": "sha256:agent-platform-json-v1:3bdbe2489c5fce7cf1964fed6668a22556c31afc6057419b725ec46273bfbdc2"
+      "content_digest": "sha256:agent-platform-json-v1:b15f0899c5770ae32ab893b7c183a16f7e2de2904f99aa3da566edbebfac6ca7"
     },
     "task_id": "task-m0-1",
     "implementer_identity": "stub-implementer-m2",

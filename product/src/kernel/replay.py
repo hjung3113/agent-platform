@@ -26,6 +26,7 @@ from kernel.protocol_v1 import (
     _LegacyVerificationV1,
     _LegacyVerificationV1RoundOne,
     _LegacyResultV1,
+    _LegacyWorkflowRevisionV1,
     AttemptPacketV1,
     ReceiptV1,
     RequestV1,
@@ -42,7 +43,7 @@ class RunState:
     """Reduced state of one run's committed lineage."""
 
     request: RequestV1 | None
-    workflow_revision: WorkflowRevisionV1 | None
+    workflow_revision: WorkflowRevisionV1 | _LegacyWorkflowRevisionV1 | None
     last_sequence: int
     last_record_id: RecordRef | None
     attempt_packet: AttemptPacketV1 | None = None
@@ -111,7 +112,7 @@ def replay(state_dir: str, run_id: str) -> RunState:
 
     run_dir = Path(state_dir) / "runs" / run_id
     request: RequestV1 | None = None
-    workflow_revision: WorkflowRevisionV1 | None = None
+    workflow_revision: WorkflowRevisionV1 | _LegacyWorkflowRevisionV1 | None = None
     last_sequence = 0
     last_record_id: RecordRef | None = None
     attempt_packet: AttemptPacketV1 | None = None
@@ -168,7 +169,7 @@ def replay(state_dir: str, run_id: str) -> RunState:
         value = result.value.value
         if isinstance(value, RequestV1):
             request = value
-        elif isinstance(value, WorkflowRevisionV1):
+        elif isinstance(value, (WorkflowRevisionV1, _LegacyWorkflowRevisionV1)):
             workflow_revision = value
         elif isinstance(value, AttemptPacketV1):
             attempt_packet = value

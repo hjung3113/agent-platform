@@ -36,7 +36,7 @@ def workflow_envelope(payload: object) -> dict:
     return {
         "contract_kind": "workflow_revision",
         "protocol_version": 1,
-        "schema_version": 1,
+        "schema_version": 2,
         "payload": payload,
     }
 
@@ -56,11 +56,13 @@ def valid_workflow_payload() -> dict:
             "record_id": "rec-request-1",
             "content_digest": REQUEST_DIGEST,
         },
-        "task": {
-            "task_id": "task-1",
-            "objective": "Implement exact dispatch",
-            "acceptance_criteria": ["Dispatch is exact"],
-        },
+        "tasks": [
+            {
+                "task_id": "task-1",
+                "objective": "Implement exact dispatch",
+                "acceptance_criteria": ["Dispatch is exact"],
+            }
+        ],
     }
 
 
@@ -181,10 +183,12 @@ class WorkflowRevisionV1Tests(unittest.TestCase):
                 record_id="rec-request-1",
                 content_digest=REQUEST_DIGEST,
             ),
-            task=TaskV1(
-                task_id="task-1",
-                objective="Implement exact dispatch",
-                acceptance_criteria=("Dispatch is exact",),
+            tasks=(
+                TaskV1(
+                    task_id="task-1",
+                    objective="Implement exact dispatch",
+                    acceptance_criteria=("Dispatch is exact",),
+                ),
             ),
         )
         first = read_workflow(valid_workflow_payload())
@@ -250,9 +254,25 @@ class WorkflowRevisionV1Tests(unittest.TestCase):
             ProtocolRejectionCode.BINDING_MISMATCH,
         )
 
-    def test_single_task_is_enforced_by_construction(self) -> None:
+    def test_tasks_are_read_as_an_ordered_sequence(self) -> None:
         payload = valid_workflow_payload()
-        payload["tasks"] = [payload["task"], payload["task"]]
+        payload["tasks"].append(
+            {
+                "task_id": "task-2",
+                "objective": "Implement the second step",
+                "acceptance_criteria": ["The second step is exact"],
+            }
+        )
+        result = read_workflow(payload)
+        self.assertTrue(result.ok, result.reason)
+        self.assertEqual(
+            tuple(task.task_id for task in result.value.value.tasks),
+            ("task-1", "task-2"),
+        )
+
+    def test_empty_tasks_reject(self) -> None:
+        payload = valid_workflow_payload()
+        payload["tasks"] = []
         self.assertEqual(
             read_workflow(payload).rejection_code,
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
@@ -260,7 +280,7 @@ class WorkflowRevisionV1Tests(unittest.TestCase):
 
     def test_tuple_valued_task_acceptance_criteria_reject(self) -> None:
         payload = valid_workflow_payload()
-        payload["task"]["acceptance_criteria"] = ("Dispatch is exact",)
+        payload["tasks"][0]["acceptance_criteria"] = ("Dispatch is exact",)
         self.assertEqual(
             read_workflow(payload).rejection_code,
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
@@ -276,19 +296,19 @@ class WorkflowRevisionV1Tests(unittest.TestCase):
 
     def test_unknown_or_empty_task_fields_reject(self) -> None:
         payload = valid_workflow_payload()
-        payload["task"]["resources"] = {"cpu": 1}
+        payload["tasks"][0]["resources"] = {"cpu": 1}
         self.assertEqual(
             read_workflow(payload).rejection_code,
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
         )
         empty = valid_workflow_payload()
-        empty["task"]["task_id"] = ""
+        empty["tasks"][0]["task_id"] = ""
         self.assertEqual(
             read_workflow(empty).rejection_code,
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
         )
         no_criteria = valid_workflow_payload()
-        no_criteria["task"]["acceptance_criteria"] = []
+        no_criteria["tasks"][0]["acceptance_criteria"] = []
         self.assertEqual(
             read_workflow(no_criteria).rejection_code,
             ProtocolRejectionCode.MALFORMED_PAYLOAD,
@@ -301,7 +321,7 @@ class WorkflowRevisionV1Tests(unittest.TestCase):
                 request=RecordRef(
                     "request", "rec-request-1", "sha256:agent-platform-json-v1:" + "c" * 64
                 ),
-                task=revision.task,
+                tasks=revision.tasks,
             )
         )
         self.assertNotEqual(workflow_revision_v1_content_digest(revision), other_digest)
@@ -310,7 +330,7 @@ class WorkflowRevisionV1Tests(unittest.TestCase):
         payload = valid_workflow_payload()
         parsed = read_workflow(payload).value
         digest_at_parse_time = parsed.envelope.content_digest()
-        payload["task"]["acceptance_criteria"].append("Later mutation")
+        payload["tasks"][0]["acceptance_criteria"].append("Later mutation")
         payload["request"]["record_id"] = "rec-request-mutated"
         self.assertEqual(parsed.envelope.content_digest(), digest_at_parse_time)
         self.assertEqual(
@@ -387,7 +407,7 @@ class WorkflowRevisionV1Tests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "request_objective_empty"):
             read_request_v1({"objective": "", "scope": [], "acceptance_criteria": ["a"]})
         with self.assertRaisesRegex(Exception, "workflow_revision_payload"):
-            read_workflow_revision_v1({"task": {}})
+            read_workflow_revision_v1({"tasks": []})
 
 
 if __name__ == "__main__":

@@ -6,12 +6,14 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
 from kernel import admission
 from kernel.protocol import (
+    ContractKind,
     ParsedCandidate,
     RecordRef,
     is_content_digest,
@@ -19,12 +21,12 @@ from kernel.protocol import (
 )
 from kernel.protocol_v1 import (
     PROTOCOL_VERSION,
-    SCHEMA_VERSION,
     AttemptPacketV1,
     RequestV1,
     TaskV1,
     WorkflowRevisionV1,
     read_result_v1,
+    schema_version_for_kind,
 )
 from kernel.publish import Published, Rejected, publish
 from execution import context_compiler, host, policy
@@ -67,7 +69,7 @@ def as_candidate(contract_kind: str, typed: Any) -> ParsedCandidate:
         {
             "contract_kind": contract_kind,
             "protocol_version": PROTOCOL_VERSION,
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": schema_version_for_kind(ContractKind(contract_kind)),
             "payload": typed.to_canonical_value(),
         }
     )
@@ -107,7 +109,7 @@ class HostExecuteTest(unittest.TestCase):
                     "workflow_revision",
                     WorkflowRevisionV1(
                         request=request_published.record_ref,
-                        task=TASK,
+                        tasks=(TASK,),
                     ),
                 ),
                 request_published.record_ref,
@@ -801,6 +803,24 @@ class HostExecuteTest(unittest.TestCase):
                 )
 
         self.assertIn("diverged from the committed Workflow Revision task", str(raised.exception))
+        self.assertFalse(self._spawned_report().exists())
+
+    def test_stale_context_pack_error_on_unknown_bound_task(self) -> None:
+        attempt_ref, attempt = self._real_attempt()
+        unknown_attempt = replace(attempt, task_id="task-host-unknown")
+
+        with self._no_required_capabilities():
+            with self.assertRaises(StaleContextPackError):
+                execute(
+                    attempt_ref,
+                    unknown_attempt,
+                    self.root,
+                    str(FIXTURE_BINARY),
+                    TASK,
+                    self.state,
+                    self.run_id,
+                )
+
         self.assertFalse(self._spawned_report().exists())
 
     def test_disclosure_identity_drift_rejects(self) -> None:

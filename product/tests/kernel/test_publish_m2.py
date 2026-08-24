@@ -72,14 +72,16 @@ def dispatch_workflow(
         {
             "contract_kind": "workflow_revision",
             "protocol_version": 1,
-            "schema_version": 1,
+            "schema_version": 2,
             "payload": {
                 "request": parent.to_canonical_value(),
-                "task": {
-                    "task_id": task_id,
-                    "objective": "Wire the attempt chain",
-                    "acceptance_criteria": CRITERIA if criteria is None else criteria,
-                },
+                "tasks": [
+                    {
+                        "task_id": task_id,
+                        "objective": "Wire the attempt chain",
+                        "acceptance_criteria": CRITERIA if criteria is None else criteria,
+                    }
+                ],
             },
         }
     )

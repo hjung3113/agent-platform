@@ -53,14 +53,16 @@ def dispatch_workflow(parent: RecordRef) -> ParsedCandidate:
         {
             "contract_kind": "workflow_revision",
             "protocol_version": 1,
-            "schema_version": 1,
+            "schema_version": 2,
             "payload": {
                 "request": parent.to_canonical_value(),
-                "task": {
-                    "task_id": "task-1",
-                    "objective": "Wire dispatch through publish end to end",
-                    "acceptance_criteria": ["Golden fixtures hold"],
-                },
+                "tasks": [
+                    {
+                        "task_id": "task-1",
+                        "objective": "Wire dispatch through publish end to end",
+                        "acceptance_criteria": ["Golden fixtures hold"],
+                    }
+                ],
             },
         }
     )

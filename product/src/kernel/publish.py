@@ -104,6 +104,7 @@ class PublishRejectionCode(StrEnum):
     LOCK_CONTENTION_TIMEOUT = "lock_contention_timeout"
     RUN_ALREADY_TERMINAL = "run_already_terminal"
     STALE_SCHEMA_VERSION = "stale_schema_version"
+    WORKFLOW_REVISION_TASK_ID_DUPLICATE = "workflow_revision_task_id_duplicate"
     ATTEMPT_TASK_BINDING_MISMATCH = "attempt_task_binding_mismatch"
     RESULT_ATTEMPT_BINDING_MISMATCH = "result_attempt_binding_mismatch"
     RESULT_ENVIRONMENT_BINDING_MISMATCH = "result_environment_binding_mismatch"
@@ -319,6 +320,12 @@ def _kind_binding_rejection(
 
     kind = content["contract_kind"]
     if kind == ContractKind.WORKFLOW_REVISION.value:
+        task_ids = tuple(task.task_id for task in value.tasks)
+        if len(task_ids) != len(set(task_ids)):
+            return Rejected(
+                PublishRejectionCode.WORKFLOW_REVISION_TASK_ID_DUPLICATE,
+                f"duplicate_task_ids={task_ids!r}",
+            )
         binding = verify_binding(value.request, _genesis_record_ref(run))
         if not binding.ok:
             return Rejected(
@@ -330,10 +337,14 @@ def _kind_binding_rejection(
         revision_ref, revision = _committed_contract(
             run, ContractKind.WORKFLOW_REVISION
         )
-        if value.task_id != revision.task.task_id:
+        bound_task = next(
+            (task for task in revision.tasks if task.task_id == value.task_id),
+            None,
+        )
+        if bound_task is None:
             return Rejected(
                 PublishRejectionCode.ATTEMPT_TASK_BINDING_MISMATCH,
-                f"task_id_expected={revision.task.task_id!r} "
+                f"task_id_expected={tuple(task.task_id for task in revision.tasks)!r} "
                 f"actual={value.task_id!r}",
             )
         binding = verify_binding(value.workflow_revision, revision_ref)
@@ -371,8 +382,19 @@ def _kind_binding_rejection(
                 f"binding_failure={binding.rejection_code}:{binding.reason}",
             )
         _, revision = _committed_contract(run, ContractKind.WORKFLOW_REVISION)
+        _, attempt_value = _committed_contract(run, ContractKind.ATTEMPT_PACKET)
+        bound_task = next(
+            (task for task in revision.tasks if task.task_id == attempt_value.task_id),
+            None,
+        )
+        if bound_task is None:
+            return Rejected(
+                PublishRejectionCode.ATTEMPT_TASK_BINDING_MISMATCH,
+                f"task_id_expected={tuple(task.task_id for task in revision.tasks)!r} "
+                f"actual={attempt_value.task_id!r}",
+            )
         covered = tuple(entry.criterion for entry in value.coverage)
-        if covered != revision.task.acceptance_criteria:
+        if covered != bound_task.acceptance_criteria:
             return Rejected(
                 PublishRejectionCode.VERIFICATION_COVERAGE_MISMATCH,
                 "coverage_criteria_dont_match_bound_workflow_revision",
@@ -411,7 +433,6 @@ def _kind_binding_rejection(
                     PublishRejectionCode.VERIFICATION_COVERAGE_MISMATCH,
                     f"finding_not_open_without_predecessor={finding.criterion!r}",
                 )
-        _, attempt_value = _committed_contract(run, ContractKind.ATTEMPT_PACKET)
         if value.verifier_identity == attempt_value.implementer_identity:
             return Rejected(
                 PublishRejectionCode.SELF_VERIFICATION_REJECTED,

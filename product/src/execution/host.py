@@ -294,7 +294,21 @@ def execute(
             "Packet's bound ref: "
             f"attempt={attempt.workflow_revision} committed={revision_ref}"
         )
-    committed_task_digest = content_digest(revision.task.to_canonical_value())
+    bound_task = next(
+        (
+            candidate
+            for candidate in getattr(revision, "tasks", ())
+            if candidate.task_id == attempt.task_id
+        ),
+        None,
+    )
+    if bound_task is None:
+        raise StaleContextPackError(
+            "Attempt Packet's task_id is not present in the committed "
+            "Workflow Revision's tasks: "
+            f"task_id={attempt.task_id!r}"
+        )
+    committed_task_digest = content_digest(bound_task.to_canonical_value())
     execute_task_digest = content_digest(task.to_canonical_value())
     if committed_task_digest != execute_task_digest:
         raise StaleContextPackError(

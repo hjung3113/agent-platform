@@ -1,9 +1,10 @@
-"""Strict v1 readers for the one-task run chain contracts.
+"""Strict v1 readers for the run-chain contracts.
 
-Owns only retained v1 contract semantics: Request, one-task Workflow
-Revision, Attempt Packet, Result (with embedded Runtime Observation),
-Verification, and terminal Receipt value types, strict payload validation,
-and canonical-value conversion used by ``kernel.canonical.content_digest()``.
+Owns only retained v1 contract semantics: Request, task-sequence Workflow
+Revision (plus its retained pre-M7 single-task shape), Attempt Packet, Result
+(with embedded Runtime Observation), Verification, and terminal Receipt value
+types, strict payload validation, and canonical-value conversion used by
+``kernel.canonical.content_digest()``.
 No retry, repair, replan, resources, fan-in, concurrency, context budget,
 runtime selection, evidence policy, or release state is represented here.
 """
@@ -29,11 +30,13 @@ from kernel.runtime_capability import _require_versioned_identity
 PROTOCOL_VERSION = 1
 SCHEMA_VERSION = 1
 # Reader/function names remain protocol-v1 names; the current Result wire shape is schema 2.
+WORKFLOW_REVISION_SCHEMA_VERSION = 2
 RESULT_SCHEMA_VERSION = 2
 VERIFICATION_SCHEMA_VERSION = 3
 
 _REQUEST_KEYS = frozenset({"objective", "scope", "acceptance_criteria"})
-_WORKFLOW_REVISION_KEYS = frozenset({"request", "task"})
+_WORKFLOW_REVISION_KEYS = frozenset({"request", "tasks"})
+_LEGACY_WORKFLOW_REVISION_KEYS = frozenset({"request", "task"})
 _TASK_KEYS = frozenset({"task_id", "objective", "acceptance_criteria"})
 _ATTEMPT_PACKET_KEYS = frozenset(
     {
@@ -92,6 +95,7 @@ RESULT_SNAPSHOT_EVIDENCE_CLASS = "result_snapshot_digest_equality@1"
 RECEIPT_TYPE_TERMINAL = "terminal"
 
 _SCHEMA_VERSION_BY_KIND = {
+    ContractKind.WORKFLOW_REVISION: WORKFLOW_REVISION_SCHEMA_VERSION,
     ContractKind.RESULT: RESULT_SCHEMA_VERSION,
     ContractKind.VERIFICATION: VERIFICATION_SCHEMA_VERSION,
 }
@@ -127,7 +131,21 @@ class TaskV1:
 
 @dataclass(frozen=True)
 class WorkflowRevisionV1:
-    """One-task Workflow Revision bound to an exact Request reference."""
+    """Ordered task-sequence Workflow Revision bound to an exact Request."""
+
+    request: RecordRef
+    tasks: tuple[TaskV1, ...]
+
+    def to_canonical_value(self) -> dict[str, Any]:
+        return {
+            "request": self.request.to_canonical_value(),
+            "tasks": [task.to_canonical_value() for task in self.tasks],
+        }
+
+
+@dataclass(frozen=True)
+class _LegacyWorkflowRevisionV1:
+    """Retained pre-M7 single-task Workflow Revision shape used for replay."""
 
     request: RecordRef
     task: TaskV1
@@ -507,6 +525,27 @@ def _require_string_sequence(
     return tuple(items)
 
 
+def _require_task_sequence(value: Any, what: str) -> tuple[TaskV1, ...]:
+    if not isinstance(value, list):
+        raise ProtocolRejected(
+            ProtocolRejectionCode.MALFORMED_PAYLOAD, f"{what}_not_sequence"
+        )
+    if not value:
+        raise ProtocolRejected(ProtocolRejectionCode.MALFORMED_PAYLOAD, f"{what}_empty")
+    tasks = []
+    task_ids: set[str] = set()
+    for index, item in enumerate(value):
+        parsed = _read_task_v1(item)
+        if parsed.task_id in task_ids:
+            raise ProtocolRejected(
+                ProtocolRejectionCode.MALFORMED_PAYLOAD,
+                f"{what}[{index}]_duplicate_task_id={parsed.task_id!r}",
+            )
+        task_ids.add(parsed.task_id)
+        tasks.append(parsed)
+    return tuple(tasks)
+
+
 def read_request_v1(payload: Any) -> ReaderOutcome:
     """Strictly read a Request v1 payload or raise ``ProtocolRejected``."""
 
@@ -538,11 +577,7 @@ def _read_task_v1(payload: Any) -> TaskV1:
 
 
 def read_workflow_revision_v1(payload: Any) -> ReaderOutcome:
-    """Strictly read a one-task Workflow Revision v1 payload.
-
-    Exactly one task exists by construction: the schema has a single ``task``
-    object field, not a task array or dependency graph.
-    """
+    """Strictly read the current ordered task-sequence Workflow Revision."""
 
     candidate = _require_object(payload, "workflow_revision_payload")
     _require_exact_keys(candidate, _WORKFLOW_REVISION_KEYS, "workflow_revision_payload")
@@ -556,8 +591,34 @@ def read_workflow_revision_v1(payload: Any) -> ReaderOutcome:
             ProtocolRejectionCode.BINDING_MISMATCH,
             "workflow_revision_request_kind_not_request",
         )
+    tasks = _require_task_sequence(candidate["tasks"], "workflow_revision_tasks")
+    revision = WorkflowRevisionV1(request=request, tasks=tasks)
+    return ReaderOutcome(
+        value=revision, canonical_payload=revision.to_canonical_value()
+    )
+
+
+def read_legacy_workflow_revision_v1(payload: Any) -> ReaderOutcome:
+    """Strictly read the retained pre-M7 single-task Workflow Revision shape."""
+
+    candidate = _require_object(payload, "workflow_revision_payload")
+    if "tasks" in candidate:
+        raise ProtocolRejected(
+            ProtocolRejectionCode.UNSUPPORTED_SCHEMA_VERSION,
+            "workflow_revision_tasks_requires_schema_version_2",
+        )
+    _require_exact_keys(
+        candidate, _LEGACY_WORKFLOW_REVISION_KEYS, "workflow_revision_payload"
+    )
+
+    request = read_record_ref(candidate["request"])
+    if request.contract_kind != ContractKind.REQUEST:
+        raise ProtocolRejected(
+            ProtocolRejectionCode.BINDING_MISMATCH,
+            "workflow_revision_request_kind_not_request",
+        )
     task = _read_task_v1(candidate["task"])
-    revision = WorkflowRevisionV1(request=request, task=task)
+    revision = _LegacyWorkflowRevisionV1(request=request, task=task)
     return ReaderOutcome(
         value=revision, canonical_payload=revision.to_canonical_value()
     )
@@ -1098,7 +1159,16 @@ register_reader(
     ContractKind.REQUEST, PROTOCOL_VERSION, SCHEMA_VERSION, read_request_v1
 )
 register_reader(
-    ContractKind.WORKFLOW_REVISION, PROTOCOL_VERSION, SCHEMA_VERSION, read_workflow_revision_v1
+    ContractKind.WORKFLOW_REVISION,
+    PROTOCOL_VERSION,
+    SCHEMA_VERSION,
+    read_legacy_workflow_revision_v1,
+)
+register_reader(
+    ContractKind.WORKFLOW_REVISION,
+    PROTOCOL_VERSION,
+    WORKFLOW_REVISION_SCHEMA_VERSION,
+    read_workflow_revision_v1,
 )
 register_reader(
     ContractKind.ATTEMPT_PACKET, PROTOCOL_VERSION, SCHEMA_VERSION, read_attempt_packet_v1
