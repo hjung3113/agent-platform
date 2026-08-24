@@ -971,6 +971,10 @@ reproduced, not inferred. Verdict: **0 BLOCKER, 2 HIGH, 3 MEDIUM, 4 LOW.**
   `VerifierSubprocessError` dropped `error.cmd`/stdout in addition to stderr). **Fixed**: all
   four corrected.
 
-Fixed in follow-up commit on the same PR #48 branch (round 3). Full validation re-run after
-the fixes: contracts/kernel/execution/verification suites plus `compileall`, independently
-outside the worktree, before merge.
+Fixed in follow-up commit `36e6bc7` on the same PR #48 branch (round 3), dispatched to
+`codex --model gpt-5.6-luna -c model_reasoning_effort="max"`. Full validation re-run after the
+fixes, independently outside the worktree: 357 tests green (contracts 146, kernel 111,
+execution 93, verification 7, up from 351) + `compileall`. Diff spot-checked against this
+subsection's stated fixes for HIGH 1 (`publish.py`'s `STALE_SCHEMA_VERSION` gate) and HIGH 2
+(`protocol_v1.py`'s `VERIFICATION_SCHEMA_VERSION = 3` bump with the round-one legacy reader
+registered at the freed `(VERIFICATION, 1, 2)` slot) — matches exactly. Pushed to PR #48.
