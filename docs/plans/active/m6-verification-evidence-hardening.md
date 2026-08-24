@@ -1,6 +1,7 @@
 # M6 — Verification / Evidence Hardening Implementation Plan
 
-Status: **Active** (hardened after `glm-5.3`-high adversarial review; see §13)
+Status: **Active** (round 1 implemented as PR #48, `93acbab`; round 2 in progress after
+post-implementation PR review found a real spec-contradicting gap in round 1's §6 — see §14)
 Tracker: Issue #5 ("Adversarial Review: Verification/Evidence Soundness")
 Milestone: **M6 only**
 Primary issue: #5
@@ -165,8 +166,9 @@ cited gap in §1, verified against the real committed producer/consumer code, no
 2. Environment binding between `ResultV1.observation.runtime_identity` and the Attempt's
    admitted `runtime_capability_profile_identity` — including the producer-side (`host.py`)
    change this requires (§5.2).
-3. A real derived verifier-environment identity, recorded and shape-validated, **not gated for
-   distinctness** — the honest scope given this deployment's real determinism (§6).
+3. A genuinely separate verifier execution process, gated for real execution-identity
+   distinctness against the implementer's own real per-spawn execution nonce (§6 — round 2;
+   round 1's retraction of this check was itself a defect, corrected per §14).
 4. Structured `FindingV1` embedded in `VerificationV1.findings`, replacing the opaque string
    tuple, with identity/fingerprint/reader-enforced shape rules and an omission-closing publish
    rule (§4).
@@ -175,8 +177,9 @@ cited gap in §1, verified against the real committed producer/consumer code, no
 
 **Explicitly not built** (see §11 for the full carried-forward list): a `ContractKind.FINDING`
 top-level record; cross-run Finding resolve/reopen/supersede triggering; a second
-evidence-trust tier; per-criterion evidence policy differentiation; a hard gate on
-verifier/implementer environment distinctness (retracted, §6); publish-boundary Finding
+evidence-trust tier; per-criterion evidence policy differentiation; a stronger verifier-trust
+requirement beyond process separation (e.g. a genuinely different binary/container/remote
+runtime — §6's honest remaining limit, M7/M9 territory); publish-boundary Finding
 transition-table resolution (demoted to reader-level shape rules, §4.3); any retry/flaky-
 evidence machinery beyond what the existing one-shot linear chain already guarantees
 structurally (§8).
@@ -346,40 +349,86 @@ This is a real, if narrow, blast-radius change: `host.py`'s Result construction,
 `test_host.py:256`'s `startswith(f"opencode@{FAKE_VERSION}+")` assertion (which must change to
 assert the digest-shaped identity instead), and every fixture enumerated above (§9, §10).
 
-## 6. Verifier-environment identity: recorded, shape-validated, not gated for distinctness
+## 6. Verifier execution identity: a genuinely separate process, gated for real distinctness
 
-**Retracted and re-scoped after review (BLOCKER 2 — the original draft's second
-self-verification check was unsatisfiable by the honest path, not just imperfect).**
-`probe_opencode_profile` is deterministic over `(binary, config_paths)`
-(`opencode_adapter.py:248–259`). In the real driver, verification is an in-process function
-call (`run_one_task.py:228–234`), not a separate runtime execution — probed with the same
-binary and configs the Attempt used, the verifier's profile identity **equals** the Attempt's
-`runtime_capability_profile_identity` with probability 1. A hard check rejecting equality
-between these two values would reject every honest Verification this system can produce —
-`run_one_task` could never publish a Verification at all, and the only way to satisfy the
-check would be probing the verifier against a different config path chosen for no reason but
-to manufacture distinctness — a polite fiction, not a real environment separation, and exactly
-the kind of guarantee-misattribution M4 §13 HIGH 1 already established this document series
-must not ship (also HIGH 3's finding, once the field is examined closely: a free, unverified
-string cannot honestly claim "environment identity, not just its name, must differ" in the
-first place — see ledger finding #3, §1.1).
+**Status: superseded design (round 2, post-implementation PR review — see §14). §6 as
+originally written (round 1) retracted the distinctness gate; that retraction is now known to
+be wrong — it contradicted a normative spec requirement, not just an aspirational roadmap
+bullet. This section replaces the retracted design. The round-1 reasoning is kept below,
+struck through in spirit but not deleted, because the diagnosis was correct even though the
+conclusion was wrong — it correctly identified that a same-process, same-probe check is
+decorative; the fix is to make the execution genuinely separate, not to give up on the
+check.**
 
-**What M6 actually does:** `VerificationV1` gains `verifier_runtime_capability_profile_identity:
-str` — the same real `RuntimeCapabilityProfile.identity` (M3, reused unchanged), probed at
-verification time. It is **recorded and shape-validated only** — the reader requires it to be
-a well-formed content digest (`sha256:agent-platform-json-v1:<64 hex>`, the same shape
-`profile.identity` itself produces) — but the publish boundary does **not** compare it against
-the Attempt's `runtime_capability_profile_identity` for distinctness. The existing
-self-verification check (`publish.py:376–380`, `verifier_identity == implementer_identity`)
-is **unchanged**, not extended.
+**Round 1's diagnosis (still correct):** `probe_opencode_profile` is deterministic over
+`(binary, config_paths)` (`opencode_adapter.py:248–259`). In the implemented driver,
+verification was an in-process function call (`run_one_task.py:228–234` as of `93acbab`) —
+probed with the same binary/configs the Attempt used, the verifier's profile identity
+**equals** the Attempt's `runtime_capability_profile_identity` with probability 1. Comparing
+these two values for inequality would reject every honest Verification.
 
-**Stated as an explicit scope limit (§11), not a silent gap:** this deployment has exactly one
-runtime, one binary, and one machine; environment-identity distinctness between implementer and
-verifier is not a property it can exhibit honestly today. M6 records real derived-identity
-evidence for a future genuinely-separate execution channel (a distinct process, container, or
-remote runtime — M7/M9 territory) to gate on; it does not pretend to gate on it now. A future
-milestone that introduces such a channel is the one that can honestly turn this into a hard
-check.
+**Why retracting the check was wrong:** `docs/specs/06-review-verification-evidence.md:15`
+(normative, not roadmap prose) states: *"final verification must have a distinct
+attempt/execution identity from the producing implementation attempt; switching only the
+role/profile inside the same execution context does not establish independence."* This is a
+hard requirement. Per this document's own opening line ("if implementation reveals a
+contradiction with those authorities, update the governing design first rather than encoding
+a local interpretation here"), round 1 should have updated the *design* to make a genuinely
+distinct execution real, not quietly scoped the requirement away. Caught by the automated PR
+reviewer (`chatgpt-codex-connector`, P1, PR #48) — see §14.
+
+**The real fix: the verifier runs as a genuinely separate OS process, not an in-process call.**
+`execution/host.py` already spawns OpenCode as a real child process via `subprocess.run`
+(`host.py:353`) — implementer execution is *already* a genuinely separate execution context
+from the orchestrator. Verification currently is not. The fix gives verification the same
+real separation:
+
+1. **A real per-spawn execution nonce on the implementer side.** `RuntimeObservationV1` gains
+   `execution_identity: str` — generated inside `host.execute()` at/after the actual
+   `subprocess.run` spawn (not deterministic, not derived from `profile.identity`):
+   `content_digest({"pid": <child pid>, "spawned_at_ns": time.time_ns(), "nonce":
+   os.urandom(16).hex()})`. This is real evidence that *this specific spawn* happened — a
+   value nothing outside that spawn could produce in advance. `ResultV1`/`RuntimeObservationV1`
+   is a schema change requiring the same legacy-retention treatment `VerificationV1` already
+   got in round 1 (§10 step 1's `schema_version_for_kind` pattern, reused, not reinvented —
+   `RESULT` moves to schema v2 with a retained v1 legacy reader for replay).
+2. **A genuinely separate verifier process.** New `verification/stub_verifier_cli.py` — a
+   small `__main__`-style entrypoint that: reads its verification inputs (result ref, output
+   digests, task, identities) from argv/stdin as JSON, independently calls
+   `probe_opencode_profile` (still real, still reused, its determinism no longer matters here
+   — see below), generates its **own** real per-invocation nonce the same way
+   (`content_digest({"pid": os.getpid(), "started_at_ns": time.time_ns(), "nonce":
+   os.urandom(16).hex()})`), calls `stub_verify(...)` with that nonce as a new
+   `verifier_execution_identity` argument, and writes the resulting `VerificationV1`'s
+   canonical JSON to stdout. `run_one_task.py` invokes it via `subprocess.run([sys.executable,
+   "-m", "verification.stub_verifier_cli", ...], capture_output=True, check=True, text=True)`
+   instead of calling `stub_verify` directly, and parses stdout back into the typed value.
+   `probe_opencode_profile`'s determinism no longer matters for the independence guarantee —
+   what makes this execution distinct is the OS-level process boundary and the fresh random
+   nonce generated inside it, not which binary/config it probed. (`verifier_runtime_capability_
+   profile_identity`, §6's round-1 field, is kept exactly as round 1 specified it: recorded,
+   shape-validated evidence of the verifier's environment — a different, still-useful
+   dimension from execution identity, not replaced by this fix.)
+3. **The real publish-boundary check.** `VerificationV1` gains
+   `verifier_execution_identity: str` (content-digest shape validated at the reader, same as
+   `verifier_runtime_capability_profile_identity`). New rule in `_kind_binding_rejection`'s
+   `VERIFICATION` branch: `value.verifier_execution_identity ==
+   result_value.observation.execution_identity` → reject
+   `SELF_VERIFICATION_REJECTED` (same code as the existing identity check — same defect
+   class: an execution claiming independence that isn't). Two independently-generated,
+   genuinely-random 128-bit nonces from two separate OS processes collide with cryptographically
+   negligible probability when the path is honest; the check exists to catch the dishonest
+   path — a caller skipping the real subprocess spawn and fabricating both values from the
+   same process — which is exactly what a mutation-suite fixture (§9) constructs directly to
+   prove the check fires.
+
+**What this still does not, and cannot, prove (stated honestly, same discipline as before):**
+that the *verifier subprocess's own binary* is uncompromised or that its `stub_verify` logic
+is not itself buggy or colluding with the implementer — process separation proves distinct
+*execution*, not distinct *trust*. `verifier_runtime_capability_profile_identity` (recorded,
+not gated) is the forward hook for a future stronger requirement (e.g. a genuinely different
+binary, container, or remote runtime — M7/M9 territory) that would close that harder gap;
+that remains the honest scope limit (§11), now one level narrower than round 1's.
 
 ## 7. Why Kernel PASS admissibility gets no new Receipt-time recompute
 
@@ -430,6 +479,13 @@ in §11, not silently dropped.
 - `verifier_runtime_capability_profile_identity` shape: must be a well-formed content digest
   (§6) — no reader shape test existed for this field in the original draft; this closes that
   gap
+- **`verifier_execution_identity` shape (§6, round 2):** must be a well-formed content digest,
+  same validator
+- **`RuntimeObservationV1.execution_identity` shape (§6, round 2, on the `ResultV1` reader):**
+  must be a well-formed content digest; `RESULT` schema bumps to v2 alongside this addition,
+  with the same `schema_version_for_kind`/legacy-reader-retention pattern `VERIFICATION`
+  already established in round 1 (§10 step 1) — a replay fixture proving a committed
+  schema-v1 `ResultV1` still replays after the bump, mirroring the `VERIFICATION` one above
 - golden-digest fixtures regenerated for the new `VerificationV1` wire shape
   (`product/tests/fixtures/protocol/v1/verification.json`, `golden-digests.json`)
 - schema-version dispatch: a `VERIFICATION` candidate declaring the new `schema_version=2`
@@ -464,14 +520,19 @@ past its own milestone's scope)
   disagrees with the bound Attempt's `runtime_capability_profile_identity` is rejected
   `RESULT_ENVIRONMENT_BINDING_MISMATCH`; the real Host's actual output (post-fix) publishes
   cleanly — this positive case is the fixture that would have caught BLOCKER 1 before it shipped
-- **Verifier-environment identity (§6, BLOCKER 2 fix):** shape-only fixtures — malformed
-  (non-digest-shaped) `verifier_runtime_capability_profile_identity` is rejected at the reader;
-  a well-formed one, **even when it equals the Attempt's own** (the honest, expected outcome
-  for this deployment), publishes — this is the fixture proving the retraction actually took,
-  not just that the field exists
-- Self-verification (`publish.py:376–380`, unchanged): `verifier_identity ==
-  implementer_identity` still rejects — regression only, no new case, since §6 does not extend
-  this check
+- **Verifier-environment identity, recorded dimension (§6):** malformed
+  (non-digest-shaped) `verifier_runtime_capability_profile_identity` is rejected at the
+  reader; a well-formed one, even when it equals the Attempt's own admitted profile identity
+  (the expected outcome — same binary/config, unrelated to execution identity), publishes —
+  proving this dimension is genuinely not gated for distinctness, only shape-checked
+- **Verifier execution identity, round 2 (§6 — supersedes round 1's retracted check):** a
+  `VERIFICATION` candidate whose `verifier_execution_identity` equals the bound Result's
+  `observation.execution_identity` is rejected `SELF_VERIFICATION_REJECTED` (this is the
+  fixture that constructs the dishonest path directly, since the honest subprocess-spawned
+  path cannot produce a real collision); a candidate with a genuinely different (fixture-
+  distinct) execution identity publishes; malformed shape is rejected at the reader
+- Self-verification, identity string (`publish.py:376–380`, unchanged): `verifier_identity ==
+  implementer_identity` still rejects — regression only, no new case
 
 ### Verifier (`product/tests/verification/test_stub_verifier.py`, extended + `stub_verify`
 updated per §10)
@@ -479,9 +540,22 @@ updated per §10)
 - every emitted coverage entry carries `evidence_class="result_snapshot_digest_equality@1"`
 - every non-`SATISFIED` entry carries a well-formed embedded `FindingV1` satisfying §4.2's
   count rule from the producer side
-- `verifier_runtime_capability_profile_identity` is threaded through and digest-shaped
+- `verifier_runtime_capability_profile_identity` and `verifier_execution_identity` are
+  threaded through and digest-shaped (unit-level: `stub_verify` itself still takes the nonce
+  as a plain argument — it does not generate it; nonce generation is `stub_verifier_cli.py`'s
+  job, §6)
 - **no test asserts `stub_verify` ever produces `BLOCKED`/`UNPROVEN` from a real input** (§3 —
   stated honestly; those states stay hand-authored-fixture-only this milestone)
+
+### Verifier subprocess CLI (`product/tests/verification/test_stub_verifier_cli.py`, new — §6
+round 2)
+
+- invoking `stub_verifier_cli` twice with identical inputs produces two *different*
+  `verifier_execution_identity` values (proves the nonce is really per-invocation random, not
+  a deterministic function of the inputs — the property the whole check depends on)
+- the CLI's stdout, parsed back, round-trips through `read_verification_v1` unchanged
+- a non-zero exit / malformed stdout from the subprocess is a real, typed failure in
+  `run_one_task.py`'s caller path (not silently treated as an empty/passing Verification)
 
 ### Known-wrong mutation suite (`product/tests/kernel/test_verification_mutation.py`, new —
 directly satisfies the roadmap's "known-wrong mutation/self-test suite" bullet)
@@ -500,6 +574,11 @@ assert the specific rejection code, each alongside its untouched-sibling case st
   MISMATCH`)
 - a `FindingV1` naming a `SATISFIED` criterion (`VERIFICATION_COVERAGE_MISMATCH`)
 - `findings` non-empty while `verdict == "PASS"` (existing rule, now typed)
+- **`verifier_execution_identity == observation.execution_identity` (§6 round 2 — constructed
+  directly, since the honest subprocess-spawned path cannot produce a real collision):**
+  `SELF_VERIFICATION_REJECTED`
+- malformed `verifier_execution_identity` / `observation.execution_identity` shape — reader
+  `MALFORMED_PAYLOAD`
 
 ### Regression (blast radius stated in full — MEDIUM 3 fix; the original draft understated
 this)
@@ -520,8 +599,15 @@ this)
   fix works end-to-end through the real driver, not just fixtures
 - `test_m6_integration.py` (new, M3→M4 naming precedent) — full chain publish/replay through
   the real hardened checks with real evidence-class/environment data, not fixture shortcuts
+- **round 2 additions (§6):** `test_host.py` gains a spawn-produces-a-fresh-`execution_identity`
+  fixture; `run_one_task.py`'s tests cover the subprocess-verifier call path including its
+  failure mode (non-zero exit / malformed stdout); `test_m3_integration.py`/
+  `test_m4_integration.py` re-verified against the `RESULT` v2 schema bump exactly as they were
+  against `VERIFICATION`'s in round 1
 
 ## 10. Implementation order
+
+**Round 1 (implemented, `93acbab`, PR #48) — steps 0–6 below, as executed:**
 
 0. **`execution/host.py` producer fix (BLOCKER 1 — new step, was missing entirely):** change
    Result construction to publish `RuntimeObservationV1.runtime_identity = profile.identity`
@@ -546,8 +632,8 @@ this)
    defaulting to `1`, with `VERIFICATION → 2`) rather than stamping the bare module constant.
 2. `kernel/publish.py`: `RESULT_ENVIRONMENT_BINDING_MISMATCH` rejection code + `RESULT` branch
    check (§5.2, built against the step-0 producer fix); `VERIFICATION` branch gains the
-   bidirectional omission-closing rule (§4.2) and the pinned-evidence-class rule (§5.1). No
-   change to the self-verification check (§6 — retracted, not extended).
+   bidirectional omission-closing rule (§4.2) and the pinned-evidence-class rule (§5.1). Round
+   1 made no change to the self-verification check here — since corrected, see round 2 below.
 3. `verification/stub_verifier.py`: `evidence_class="result_snapshot_digest_equality@1"` on
    every entry, embedded `FindingV1` per non-`SATISFIED` entry (count-matched per §4.2),
    `verifier_runtime_capability_profile_identity` parameter threaded through from a real
@@ -561,19 +647,51 @@ this)
 6. `test_m6_integration.py` proving identical Kernel publish/replay/PASS/FAIL invariants
    through the real hardened checks, driven through the corrected `host.py` producer.
 
+**Round 2 (§6 correction, post-PR-#48-review, not yet implemented) — new steps, applied on
+top of round 1's committed state, grounded against the real code as it exists after `93acbab`
+(re-verify line numbers at implementation time — do not trust round-1 citations for files
+round 2 touches):**
+
+7. `kernel/protocol_v1.py`: `RuntimeObservationV1` gains `execution_identity: str`
+   (content-digest shape validated). `ResultV1` bumps to schema v2 via the same
+   `schema_version_for_kind`/legacy-reader-retention mechanism round 1 built for
+   `VERIFICATION` (reuse the mechanism, don't reinvent it) — retain a v1 `ResultV1` reader for
+   replaying pre-round-2 history, including the Results round 1 itself already published to
+   any real run. `VerificationV1` gains `verifier_execution_identity: str` (same shape
+   validation), alongside the existing `verifier_runtime_capability_profile_identity` (kept
+   unchanged, still recorded-not-gated).
+8. `execution/host.py`: generate the real per-spawn `execution_identity` at/after the
+   `subprocess.run` call (`host.py:353` as of `93acbab`) and thread it into
+   `RuntimeObservationV1` alongside the existing `runtime_identity=profile.identity` (round 1,
+   unchanged).
+9. New `verification/stub_verifier_cli.py` — `__main__` entrypoint wrapping `stub_verify`,
+   generating its own real per-invocation `verifier_execution_identity` nonce inside the
+   subprocess and emitting the resulting `VerificationV1` as canonical JSON on stdout.
+10. `execution/run_one_task.py`: replace the in-process `stub_verify(...)` call with a
+    `subprocess.run([sys.executable, "-m", "verification.stub_verifier_cli", ...])` invocation,
+    parsing stdout back into the typed `VerificationV1`; handle non-zero exit / malformed
+    stdout as a real, typed failure (not a silent pass-through).
+11. `kernel/publish.py`: `VERIFICATION` branch gains the
+    `verifier_execution_identity == result_value.observation.execution_identity` check,
+    reported under the existing `SELF_VERIFICATION_REJECTED` code (§6).
+12. Test suite additions per §9's round-2 bullets; full regression pass (round 1's entire
+    suite must stay green — this is an additive correction, not a redesign of round 1's other
+    checks).
+
 ## 11. Explicit scope limits carried forward (not gaps to silently close here)
 
 Per AGENTS.md rule 9 (YAGNI) and M3/M4's own explicit-deferrals precedent:
 
-- **Genuine execution-environment independence between implementer and verifier** (§6): this
-  deployment has one runtime, one binary, one machine, and an in-process verifier —
-  `probe_opencode_profile`'s determinism means implementer and verifier profile identities
-  collide with probability 1 under any honest same-config probe. M6 records a real,
-  shape-validated verifier-environment identity as forward evidence; it does not gate on
-  distinctness, because doing so would either reject every honest run or measure a decorative
-  config-file choice rather than genuine separation. Revisit only when a genuinely separate
-  execution channel (distinct process/container/remote runtime) exists to probe against — M7
-  or M9 territory.
+- **A stronger verifier-trust requirement beyond real process separation** (§6, narrowed in
+  round 2): M6 now gates on genuine execution-identity distinctness (a real subprocess with a
+  real random nonce, checked against the implementer's own real per-spawn nonce) — this is a
+  real, adversarially-meaningful check, not the round-1 retraction. What it still does not
+  prove: that the verifier's binary/logic is trustworthy or uncompromised, or that the
+  verifier runs on genuinely different hardware/network/binary from the implementer (both
+  currently spawn the same `opencode` binary from the same checkout, just as separate
+  processes). `verifier_runtime_capability_profile_identity` (recorded, not gated) remains the
+  forward hook for that stronger requirement — a genuinely different binary, container, or
+  remote runtime. Revisit when M7/M9 make that load-bearing.
 - **`ContractKind.FINDING` as an independently-published record** (§4.1): the strict linear
   chain has no slot for it without a lineage-shape change disproportionate to what
   one-Attempt-per-run needs.
@@ -608,17 +726,23 @@ findings rather than the original draft's declared-but-unimplemented claims:
   environment is rejected before it can become evidence for any criterion (§5.2, built on the
   corrected `host.py` producer — this is the check that would have been unshippable without
   BLOCKER 1's fix)
-- self-verification via the existing `verifier_identity`/`implementer_identity` string check
-  is rejected, unchanged from M2; genuine environment-provenance independence beyond that is
-  explicitly out of scope for this single-runtime deployment (§6, §11) — not claimed as closed
+- self-verification is rejected two ways: the existing `verifier_identity`/
+  `implementer_identity` string check (unchanged from M2), and — as of round 2 — a real
+  execution-identity check requiring the verifier's genuine per-spawn subprocess nonce to
+  differ from the implementer's own (§6); this satisfies
+  `docs/specs/06-review-verification-evidence.md:15`'s distinct-attempt/execution-identity
+  requirement via real process separation, not a same-process label swap. What remains
+  explicitly out of scope (§11): verifier binary/trust distinctness beyond process separation
+  (same `opencode` binary, separate process) — not claimed as closed
 - an unresolved blocking Finding cannot disappear by omission **within one run's Verification
   publish**, in both directions (a non-SATISFIED criterion without a Finding, and a Finding
   attached to a SATISFIED criterion — §4.2) — the cross-run form is explicitly out of scope
   (§11) pending M7
 - wrong evidence digest, wrong evidence class, wrong environment binding, malformed
-  verifier-environment identity, and omitted/misattached Findings are all rejected by the
-  known-wrong mutation suite (§9), each proven alongside its untouched-sibling case still
-  publishing correctly through the real, corrected producer path
+  verifier-environment identity, a colliding verifier execution identity, and omitted/
+  misattached Findings are all rejected by the known-wrong mutation suite (§9), each proven
+  alongside its untouched-sibling case still publishing correctly through the real, corrected
+  producer path
 
 ## 13. Adversarial review log
 
@@ -701,3 +825,41 @@ the post-hardening state):
   relevant difference — same deterministic function, different call site and timing — which is
   exactly what makes the two identities collide). Folded into BLOCKER 2's fix — §6 now states
   the determinism explicitly as the reason the check is retracted.
+
+## 14. Round 2 — post-implementation PR review
+
+Round 1 was implemented (`93acbab`, [PR #48](https://github.com/hjung3113/agent-platform/pull/48),
+338 tests green) and reviewed automatically by `chatgpt-codex-connector` against the real
+committed diff. One finding, confirmed and corrected before merge:
+
+- **P1** (round 1's §6 retraction of the self-verification distinctness check contradicts a
+  normative spec requirement, not just an aspirational roadmap bullet).
+  `docs/specs/06-review-verification-evidence.md:15` states: *"final verification must have a
+  distinct attempt/execution identity from the producing implementation attempt; switching
+  only the role/profile inside the same execution context does not establish independence."*
+  This is a hard requirement of a governing spec document, not the roadmap's general
+  vocabulary that earlier sections of this plan were careful to distinguish from real,
+  enforceable checks. Round 1's BLOCKER 2 fix (§6, original) correctly diagnosed that a
+  same-process, deterministic-probe comparison is unsatisfiable and decorative — but drew the
+  wrong conclusion from that diagnosis: it retracted the check instead of making the execution
+  genuinely separate, which is what the spec actually requires and what the diagnosis's own
+  reasoning pointed toward. Per this document's own opening line ("if implementation reveals a
+  contradiction with those authorities, update the governing design first rather than encoding
+  a local interpretation here"), round 1 should have escalated this as a design question
+  rather than silently resolving it via scope retraction. Caught by the automated PR reviewer
+  (`chatgpt-codex-connector`, review comment on `protocol_v1.py:849`,
+  [PR #48 discussion](https://github.com/hjung3113/agent-platform/pull/48#discussion_r3839110881)),
+  confirmed by re-reading the spec directly, and confirmed a second time by grepping this
+  codebase for any existing session/execution-identity primitive (`grep -rn
+  "session_id\|execution_id\|attempt_id" execution/host.py execution/opencode_adapter.py
+  execution/run_one_task.py` — none exists), proving the gap was real and not already closed
+  elsewhere. **Required correction, escalated to and confirmed by the repo owner** (not
+  resolved unilaterally, given it changes real architecture): give the verifier a genuinely
+  separate OS process (`verification/stub_verifier_cli.py`, subprocess-spawned from
+  `run_one_task.py`) with a real per-invocation random execution nonce, checked against a
+  matching real per-spawn nonce now recorded on the Result's `RuntimeObservationV1` (host.py
+  already spawns OpenCode as a real separate child process — this reuses that existing real
+  boundary rather than inventing a new one). Full corrected design in §6 (round 2); round-2
+  implementation order in §10; round-2 test additions in §9. Not yet implemented — round 1's
+  committed code (`93acbab`) still has the round-1 retraction; round 2 is a follow-up commit
+  on the same PR #48 branch.
