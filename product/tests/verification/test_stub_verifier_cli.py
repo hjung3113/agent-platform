@@ -44,10 +44,10 @@ class StubVerifierCliTest(unittest.TestCase):
             "config_paths": [],
         }
 
-    def invoke(self) -> subprocess.CompletedProcess[str]:
+    def invoke(self, payload: dict | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, "-m", "verification.stub_verifier_cli"],
-            input=json.dumps(self.input_payload()),
+            input=json.dumps(self.input_payload() if payload is None else payload),
             capture_output=True,
             text=True,
             check=False,
@@ -78,6 +78,15 @@ class StubVerifierCliTest(unittest.TestCase):
         parsed = read_verification_v1(json.loads(result.stdout))
         self.assertTrue(is_content_digest(parsed.value.verifier_execution_identity))
         self.assertEqual(parsed.value.verdict, "PASS")
+
+    def test_task_without_depends_on_is_rejected(self) -> None:
+        payload = self.input_payload()
+        del payload["task"]["depends_on"]
+
+        result = self.invoke(payload)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("task_keys_mismatch", result.stderr)
 
 
 if __name__ == "__main__":

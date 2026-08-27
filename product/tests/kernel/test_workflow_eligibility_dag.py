@@ -111,6 +111,20 @@ class WorkflowEligibilityDagTests(unittest.TestCase):
             WorkflowEligibilityRejectionCode.TASK_ORDER_VIOLATION,
         )
 
+    def test_unknown_dependency_reference_fails_closed(self) -> None:
+        revision = WorkflowRevisionV1(
+            request=REQUEST_REF,
+            tasks=(task("A", ("ghost",)),),
+        )
+
+        with self.assertRaises(WorkflowEligibilityRejected) as raised:
+            project_workflow_eligibility(revision, {})
+
+        self.assertEqual(
+            raised.exception.code,
+            WorkflowEligibilityRejectionCode.UNKNOWN_TASK_ID,
+        )
+
     def test_failed_task_blocks_workflow_but_ready_set_keeps_independent_task(self) -> None:
         tasks = (*DIAMOND_TASKS, task("E"))
         revision = WorkflowRevisionV1(request=REQUEST_REF, tasks=tasks)

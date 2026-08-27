@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from kernel.canonical import content_digest
@@ -127,6 +128,27 @@ class TaskV1:
 
     def to_canonical_value(self) -> dict[str, Any]:
         return _task_canonical_value(self, include_dependencies=True)
+
+
+class TaskDependencyGraphFailure(StrEnum):
+    """Structured failure kinds emitted by dependency-graph validation."""
+
+    DUPLICATE_TASK_ID = "duplicate_task_id"
+    MALFORMED_DEPENDENCY = "malformed_dependency"
+    UNKNOWN_DEPENDENCY = "unknown_dependency"
+    SELF_DEPENDENCY = "self_dependency"
+    DUPLICATE_DEPENDENCY = "duplicate_dependency"
+    DEPENDENCY_CYCLE = "dependency_cycle"
+
+
+class TaskDependencyGraphRejected(ProtocolRejected):
+    """Typed protocol rejection with a dependency-check discriminator."""
+
+    def __init__(
+        self, failure: TaskDependencyGraphFailure, reason: str
+    ) -> None:
+        super().__init__(ProtocolRejectionCode.MALFORMED_PAYLOAD, reason)
+        self.failure = failure
 
 
 @dataclass(frozen=True)
@@ -619,8 +641,8 @@ def _validate_task_dependency_graph(tasks: tuple[TaskV1, ...]) -> None:
     task_ids = tuple(task.task_id for task in tasks)
     task_id_set = set(task_ids)
     if len(task_ids) != len(task_id_set):
-        raise ProtocolRejected(
-            ProtocolRejectionCode.MALFORMED_PAYLOAD,
+        raise TaskDependencyGraphRejected(
+            TaskDependencyGraphFailure.DUPLICATE_TASK_ID,
             f"workflow_revision_duplicate_task_ids={task_ids!r}",
         )
 
@@ -629,11 +651,17 @@ def _validate_task_dependency_graph(tasks: tuple[TaskV1, ...]) -> None:
         raw_dependencies: Any = task.depends_on
         if isinstance(raw_dependencies, tuple):
             raw_dependencies = list(raw_dependencies)
-        dependencies[task.task_id] = _require_string_sequence(
-            raw_dependencies,
-            f"task[{task.task_id}]_depends_on",
-            allow_empty=True,
-        )
+        try:
+            dependencies[task.task_id] = _require_string_sequence(
+                raw_dependencies,
+                f"task[{task.task_id}]_depends_on",
+                allow_empty=True,
+            )
+        except ProtocolRejected as rejection:
+            raise TaskDependencyGraphRejected(
+                TaskDependencyGraphFailure.MALFORMED_DEPENDENCY,
+                rejection.reason,
+            ) from rejection
 
     for task_id in task_ids:
         task_dependencies = dependencies[task_id]
@@ -642,18 +670,18 @@ def _validate_task_dependency_graph(tasks: tuple[TaskV1, ...]) -> None:
             None,
         )
         if unknown is not None:
-            raise ProtocolRejected(
-                ProtocolRejectionCode.MALFORMED_PAYLOAD,
+            raise TaskDependencyGraphRejected(
+                TaskDependencyGraphFailure.UNKNOWN_DEPENDENCY,
                 f"workflow_revision_unknown_dependency={task_id!r}->{unknown!r}",
             )
         if task_id in task_dependencies:
-            raise ProtocolRejected(
-                ProtocolRejectionCode.MALFORMED_PAYLOAD,
+            raise TaskDependencyGraphRejected(
+                TaskDependencyGraphFailure.SELF_DEPENDENCY,
                 f"workflow_revision_self_dependency={task_id!r}",
             )
         if len(task_dependencies) != len(set(task_dependencies)):
-            raise ProtocolRejected(
-                ProtocolRejectionCode.MALFORMED_PAYLOAD,
+            raise TaskDependencyGraphRejected(
+                TaskDependencyGraphFailure.DUPLICATE_DEPENDENCY,
                 f"workflow_revision_duplicate_dependency={task_id!r}",
             )
 
@@ -678,8 +706,8 @@ def _validate_task_dependency_graph(tasks: tuple[TaskV1, ...]) -> None:
                 ready.append(dependent)
 
     if dequeued != len(task_ids):
-        raise ProtocolRejected(
-            ProtocolRejectionCode.MALFORMED_PAYLOAD,
+        raise TaskDependencyGraphRejected(
+            TaskDependencyGraphFailure.DEPENDENCY_CYCLE,
             "workflow_revision_dependency_cycle",
         )
 

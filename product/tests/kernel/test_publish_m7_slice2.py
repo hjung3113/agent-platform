@@ -121,6 +121,31 @@ class PublishM7Slice2Tests(unittest.TestCase):
             PublishRejectionCode.WORKFLOW_REVISION_DEPENDENCY_CYCLE,
         )
 
+    def test_publish_rejects_non_string_dependency_as_typed_rejection(self) -> None:
+        request = self.publish_request()
+        malformed_task = TaskV1(
+            task_id="task-a",
+            objective="Objective for task-a",
+            acceptance_criteria=("Criterion for task-a",),
+            depends_on=(42,),
+        )
+
+        result = publish(
+            self.state,
+            request.run_id,
+            workflow_candidate(request.record_ref, (malformed_task,)),
+            request.record_ref,
+            "slice2-malformed-dependency",
+        )
+
+        self.assertIsInstance(result, Rejected)
+        assert isinstance(result, Rejected)
+        self.assertEqual(
+            result.code,
+            PublishRejectionCode.WORKFLOW_REVISION_DEPENDENCY_MALFORMED,
+        )
+        self.assertEqual(replay(self.state, request.run_id).last_sequence, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

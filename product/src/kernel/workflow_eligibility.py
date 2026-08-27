@@ -167,6 +167,18 @@ def project_workflow_eligibility(
             WorkflowEligibilityRejectionCode.WORKFLOW_REVISION_TASK_ID_DUPLICATE,
             f"duplicate_task_ids={task_ids!r}",
         )
+    task_id_set = set(task_ids)
+    unknown_dependencies = tuple(
+        dependency
+        for task in admitted_revision.tasks
+        for dependency in task.depends_on
+        if dependency not in task_id_set
+    )
+    if unknown_dependencies:
+        raise WorkflowEligibilityRejected(
+            WorkflowEligibilityRejectionCode.UNKNOWN_TASK_ID,
+            f"unknown_dependency_ids={unknown_dependencies!r}",
+        )
     unknown = sorted(set(task_runs) - set(task_ids))
     if unknown:
         raise WorkflowEligibilityRejected(
