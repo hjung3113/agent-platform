@@ -832,3 +832,127 @@ rejection`'s existing check and §4.4's original "one canonical shared identity"
 time except narrowing what "shared" means to `tasks`. The plan is corrected in place (§4.2–§4.4,
 §9's eligibility/regression test descriptions, §10 steps 5–6) rather than logged as a deferred
 gap, matching this document's own discipline for BLOCKER/HIGH findings.
+
+## 14. Round 2 review (PR #49, post-implementation, against `a4f6121`)
+
+PR #49 opened for `a4f6121`. GitHub's `chatgpt-codex-connector` auto-review (2 inline findings)
+plus a manual adversarial pass by the repo owner (4 findings, posted as PR review comments) found
+**6 real defects, all against this slice's own core guarantee** ("strict ordered multi-task
+execution" — not later-slice behavior). Decision: blocking, no merge yet. All 6 fixed directly
+below (§14.1–§14.6) — no protocol/contract schema change required for any of them; all are
+driver-layer (`execution/run_one_task.py`) or eligibility-module (`kernel/workflow_eligibility.py`)
+fixes.
+
+### 14.1 [P1] Eligibility trusts the caller-supplied `task_runs` mapping key, not the run's own committed identity
+
+`project_workflow_eligibility()` / `_state_kind()` never check that a `RunState` returned under key
+`"task-1"` actually belongs to task 1 — only `_validate_revision_copies()`'s tasks-sequence-digest
+check runs, which every per-task run passes identically by construction (§4.4). A completed
+task-2 run's `RunState` supplied under key `"task-1"` is silently accepted as task 1 complete.
+
+**Fix:** in `_state_kind()` (or a new helper called from it), when `state.attempt_packet` is not
+`None`, read its `task_id` and compare against the mapping key passed in (requires threading the
+key through — change `_state_kind(state)` to `_state_kind(task_id, state)` and thread through its
+one call site in `project_workflow_eligibility`'s loop and `_validate_revision_copies`'s callers as
+needed). On mismatch, raise a new `WorkflowEligibilityRejectionCode.TASK_IDENTITY_MISMATCH` rather
+than accepting. Add a negative test: task-2's completed `RunState` supplied under `"task-1"` must
+raise, not return `complete`.
+
+### 14.2 [P1] Eligibility silently repairs out-of-order committed work instead of failing closed
+
+The projection loop returns the first non-complete task and stops — it never checks whether a
+*later* task_id's state is already in-flight/complete while an earlier one is not. A lineage where
+task 2 completed before task 1 ever ran (a real ordering violation, since Option A's per-task runs
+are independently addressable) is normalized into "task 1 next, then already-complete task 2"
+instead of being rejected.
+
+**Fix:** after computing `_state_kind` for every task in order, if any task's kind is anything
+other than `"not_started"` while an earlier task's kind is not `"complete"`, raise a new
+`WorkflowEligibilityRejectionCode.TASK_ORDER_VIOLATION` before returning a normal
+`NEXT_TASK`/`WORKFLOW_COMPLETE` result. Add negative tests: task-1 `not_started` + task-2
+`in_flight`; task-1 `not_started` + task-2 terminal-PASS `complete`.
+
+### 14.3 [P1] The fail-closed eligibility/divergence projection is never called on the real execution path
+
+`run_workflow()` just loops `tasks` in order and calls `run_one_task()` unconditionally for each —
+it never calls `project_workflow_eligibility()` at all. `_validate_revision_copies`'s divergence
+check therefore never runs against real committed state.
+
+**Fix (bounded to this slice, no new contract field, no new persistent workflow-identity concept):**
+add a read-only lookup — `kernel/publish.py` gains
+`find_committed_run_for_idempotency_key(state, idempotency_key, expected_digest) -> str | None`,
+a thin wrapper around the existing `_find_genesis_idempotent_publish` lookup path with **no
+side effect when no match is found** (unlike `publish()`, it must never create a new run as a
+side effect of looking). In `run_workflow()`, before executing each task in sequence: compute that
+task's `request` idempotency key from the *current* `tasks` argument, look up any already-committed
+run via the new helper, and if found, `kernel.replay.replay(state, run_id)` it into a
+`task_runs: dict[str, RunState]` entry for that task_id. Once all already-committed task runs (if
+any) are collected, call `project_workflow_eligibility(candidate_revision, task_runs)` — where
+`candidate_revision` is a `WorkflowRevisionV1`-shaped stand-in built from `tasks` for the purpose of
+this call (request ref can be a placeholder since `project_workflow_eligibility` only reads
+`.tasks` off it) — and only then proceed with the loop, using the projection's verdict
+(`NEXT_TASK`/`WORKFLOW_COMPLETE`/`WORKFLOW_BLOCKED`) to decide whether to call `run_one_task` for
+each task rather than blindly calling it regardless. Any `WorkflowEligibilityRejected` raised here
+(including `WORKFLOW_REVISION_DIGEST_DIVERGENCE`, §4.2's cross-run digest-agreement check) must
+propagate as a typed driver-level failure, not be swallowed. Add an integration test: run task 1 to
+completion, then call `run_workflow()` again with task 1 replaced by a different task at the same
+`task_id` (same task_id, different `objective`/`acceptance_criteria` — a genuinely different tasks
+digest) — must raise divergence, not silently start a fresh, unrelated run.
+
+### 14.4 [P1] `run_workflow()` reuses one `expected_output_digest` for every task
+
+A single `expected_output_digest` parameter is forwarded unchanged to every `run_one_task()` call.
+Any real (non-`noop`) multi-task workflow where task 1 and task 2 produce different workspace
+snapshots cannot verify correctly — one of the two tasks is guaranteed to fail verification
+regardless of which single digest is chosen. The existing `test_run_workflow.py` uses `noop` for
+both tasks, which masks this because a no-op task's output digest never changes.
+
+**Fix (driver-API-only change, no contract change):** `run_workflow()`'s
+`expected_output_digest: str` parameter becomes `expected_output_digests: tuple[str, ...]` — same
+length as `tasks`, index-aligned — and it passes `expected_output_digests[i]` to each
+`run_one_task()` call instead of one shared value. Update the one existing caller
+(`test_run_workflow.py`) and add a new 2-task integration test where both tasks actually mutate the
+workspace (not `noop`) and have distinct expected output digests, proving both tasks can pass in
+the same workflow.
+
+### 14.5 [P2, codex inline finding, `run_one_task.py:395`] Crash-resume rebuilds and republishes the Attempt Packet before checking for an existing committed one
+
+If the process crashes after publishing the Result (workspace already mutated) and is reinvoked,
+`run_one_task()` unconditionally calls `build_attempt_packet()` from the *current* (now-modified)
+workspace and republishes it under the same attempt idempotency key before ever reaching the
+`existing_result` lookup — the freshly-rebuilt packet has a different `workspace_snapshot_digest`
+than the originally-committed one, so `publish()` rejects with
+`IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_CONTENT` instead of resuming.
+
+**Fix:** mirror the existing `_read_existing_contract`/`existing_result` pattern already used for
+Result/Verification/Receipt — before calling `build_attempt_packet`, call
+`_read_existing_contract(state, request_published.run_id, ContractKind.ATTEMPT_PACKET)`; if found,
+reuse the committed `AttemptPacketV1` (skip `build_attempt_packet` and the `publish()` call
+entirely) instead of rebuilding from the current workspace. Add a crash-resume regression test:
+publish through Result, mutate the workspace out-of-band (simulating a completed side effect before
+a crash), reinvoke `run_one_task` with the same arguments, assert it reuses the committed Attempt
+Packet rather than raising `IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_CONTENT`.
+
+### 14.6 [P2, codex inline finding, `run_one_task.py:126`] Workflow idempotency key omits Request identity
+
+`workflow_record_idempotency_key()` derives its key from `(tasks_digest, task_id, record)` only.
+Two distinct Requests that happen to decompose into an identical task sequence derive the same
+genesis key for task 1's `"request"` record; since genesis idempotency keys are searched globally
+across all runs (`_find_genesis_idempotent_publish`), the second, independently-valid Request is
+rejected with `IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_CONTENT` instead of starting its own run.
+
+**Fix:** fold the Request's own content identity into the key namespace — since `request` (the
+`RequestV1` value) is already a parameter available before any key is computed, add
+`request_identity = content_digest(request.to_canonical_value())` and include it in
+`workflow_record_idempotency_key()`'s digested payload (alongside `workflow_revision_digest`,
+`task_id`, `record`) for every per-task record, not only downstream ones. This is a pure key-
+derivation change — no contract/schema field changes. Add a regression test: two distinct
+`RequestV1` values (different `objective`) with identical `tasks` sequences must each get their own
+run, not collide.
+
+### Dispatch
+
+All 6 fixes above are bounded to `kernel/workflow_eligibility.py`, `kernel/publish.py` (one new
+read-only helper), and `execution/run_one_task.py` — no protocol/contract schema version bump, no
+change to `_kind_binding_rejection`'s existing genesis-binding check. Dispatched for implementation
+in the same worktree (`m7-orchestration-expansion-slice1`) on top of `a4f6121`.
