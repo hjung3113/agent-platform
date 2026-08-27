@@ -46,6 +46,7 @@ TASK = TaskV1(
         "The real Host Result binds to the published Attempt Packet",
         "The stub Verifier covers every acceptance criterion in order",
     ),
+    depends_on=(),
 )
 DIFFERENT_EXPECTED_DIGEST = content_digest(
     {"fixture": "m3-integration", "expected_output": "deliberately-different"}

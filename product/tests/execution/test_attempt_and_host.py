@@ -35,6 +35,7 @@ def _task(task_id: str) -> TaskV1:
         task_id=task_id,
         objective="Drive the attempt packet through the host",
         acceptance_criteria=("The Attempt Packet binds to the committed Workflow Revision",),
+        depends_on=(),
     )
 
 

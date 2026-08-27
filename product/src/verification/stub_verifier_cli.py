@@ -31,18 +31,24 @@ def _require_nonempty_string(value: Any, name: str) -> str:
 
 def _read_task(value: Any) -> TaskV1:
     candidate = _require_object(value, "task")
-    required = {"task_id", "objective", "acceptance_criteria"}
+    required = {"task_id", "objective", "acceptance_criteria", "depends_on"}
     if set(candidate) != required:
         raise ValueError("task_keys_mismatch")
     criteria = candidate["acceptance_criteria"]
     if not isinstance(criteria, list):
         raise ValueError("task_acceptance_criteria_not_list")
+    depends_on = candidate["depends_on"]
+    if not isinstance(depends_on, list):
+        raise ValueError("task_depends_on_not_list")
     return TaskV1(
         task_id=_require_nonempty_string(candidate["task_id"], "task_id"),
         objective=_require_nonempty_string(candidate["objective"], "task_objective"),
         acceptance_criteria=tuple(
             _require_nonempty_string(item, "task_acceptance_criterion")
             for item in criteria
+        ),
+        depends_on=tuple(
+            _require_nonempty_string(item, "task_dependency") for item in depends_on
         ),
     )
 

@@ -45,11 +45,13 @@ TASKS = (
         task_id="task-m7-1",
         objective="Execute the first M7 task",
         acceptance_criteria=("The first task passes",),
+        depends_on=(),
     ),
     TaskV1(
         task_id="task-m7-2",
         objective="Execute the second M7 task",
         acceptance_criteria=("The second task passes",),
+        depends_on=("task-m7-1",),
     ),
 )
 BLOCKED_RUNTIME_PROFILE = content_digest({"fixture": "m7-blocked-verifier"})

@@ -20,8 +20,12 @@ REQUEST_REF = RecordRef(
 
 
 TASKS = (
-    TaskV1("task-1", "First task", ("First criterion",)),
-    TaskV1("task-2", "Second task", ("Second criterion",)),
+    TaskV1("task-1", "First task", ("First criterion",), ()),
+    TaskV1("task-2", "Second task", ("Second criterion",), ()),
+)
+LINEAR_TASKS = (
+    TASKS[0],
+    TaskV1("task-2", "Second task", ("Second criterion",), ("task-1",)),
 )
 
 
@@ -153,10 +157,12 @@ class WorkflowEligibilityTests(unittest.TestCase):
     def test_later_in_flight_task_before_earlier_task_fails_closed(self) -> None:
         with self.assertRaises(WorkflowEligibilityRejected) as raised:
             project_workflow_eligibility(
-                revision(),
+                revision(LINEAR_TASKS),
                 {
                     "task-2": run_state(
-                        revision(), head="attempt_packet", task_id="task-2"
+                        revision(LINEAR_TASKS),
+                        head="attempt_packet",
+                        task_id="task-2",
                     )
                 },
             )
@@ -169,10 +175,10 @@ class WorkflowEligibilityTests(unittest.TestCase):
     def test_later_complete_task_before_earlier_task_fails_closed(self) -> None:
         with self.assertRaises(WorkflowEligibilityRejected) as raised:
             project_workflow_eligibility(
-                revision(),
+                revision(LINEAR_TASKS),
                 {
                     "task-2": run_state(
-                        revision(),
+                        revision(LINEAR_TASKS),
                         head="receipt",
                         verdict="PASS",
                         task_id="task-2",
@@ -212,7 +218,7 @@ class WorkflowEligibilityTests(unittest.TestCase):
 
     def test_task_sequence_digest_divergence_fails_closed(self) -> None:
         divergent = (
-            TaskV1("task-1", "First task", ("Changed criterion",)),
+            TaskV1("task-1", "First task", ("Changed criterion",), ()),
             TASKS[1],
         )
         other_request_revision = WorkflowRevisionV1(

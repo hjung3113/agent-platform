@@ -1,4 +1,4 @@
-"""Pure linear-workflow eligibility projection for M7 slice 1.
+"""Pure DAG-workflow eligibility projection for M7 slice 2.
 
 The projection reads only an admitted task sequence and replayed per-task
 lineage. It does not publish records, inspect runtime state, or mutate a
@@ -42,11 +42,12 @@ class WorkflowEligibilityRejected(Exception):
 
 @dataclass(frozen=True)
 class WorkflowEligibility:
-    """The deterministic next action for one admitted linear workflow."""
+    """The deterministic ready set and next action for one admitted workflow."""
 
     status: WorkflowEligibilityStatus
     task: TaskV1 | None = None
     reason: str = ""
+    eligible_tasks: tuple[TaskV1, ...] = ()
 
     @property
     def task_id(self) -> str | None:
@@ -179,26 +180,46 @@ def project_workflow_eligibility(
         _state_kind(task.task_id, task_runs.get(task.task_id))
         for task in admitted_revision.tasks
     )
-    for index, kind in enumerate(state_kinds):
+    state_by_task_id = dict(zip(task_ids, state_kinds))
+    for task, kind in zip(admitted_revision.tasks, state_kinds):
         if kind != "not_started" and any(
-            earlier_kind != "complete" for earlier_kind in state_kinds[:index]
+            state_by_task_id[dependency] != "complete"
+            for dependency in task.depends_on
         ):
             raise WorkflowEligibilityRejected(
                 WorkflowEligibilityRejectionCode.TASK_ORDER_VIOLATION,
-                f"task_index={index} kind={kind!r} earlier={state_kinds[:index]!r}",
+                f"task_id={task.task_id!r} kind={kind!r} "
+                f"depends_on={task.depends_on!r} state_kinds={state_kinds!r}",
             )
 
+    eligible_tasks = tuple(
+        task
+        for task, kind in zip(admitted_revision.tasks, state_kinds)
+        if kind in {"not_started", "in_flight"}
+        and all(state_by_task_id[dependency] == "complete" for dependency in task.depends_on)
+    )
+
     for task, kind in zip(admitted_revision.tasks, state_kinds):
-        if kind == "complete":
-            continue
         if kind in {"fail", "blocked"}:
             return WorkflowEligibility(
                 status=WorkflowEligibilityStatus.WORKFLOW_BLOCKED,
                 task=task,
                 reason=kind.upper(),
+                eligible_tasks=eligible_tasks,
             )
+
+    if all(kind == "complete" for kind in state_kinds):
         return WorkflowEligibility(
-            status=WorkflowEligibilityStatus.NEXT_TASK,
-            task=task,
+            status=WorkflowEligibilityStatus.WORKFLOW_COMPLETE,
+            eligible_tasks=eligible_tasks,
         )
-    return WorkflowEligibility(status=WorkflowEligibilityStatus.WORKFLOW_COMPLETE)
+    if not eligible_tasks:
+        raise WorkflowEligibilityRejected(
+            WorkflowEligibilityRejectionCode.AMBIGUOUS_RUN_STATE,
+            f"no_eligible_tasks state_kinds={state_kinds!r}",
+        )
+    return WorkflowEligibility(
+        status=WorkflowEligibilityStatus.NEXT_TASK,
+        task=eligible_tasks[0],
+        eligible_tasks=eligible_tasks,
+    )

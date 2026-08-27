@@ -1,7 +1,7 @@
 {
   "contract_kind": "workflow_revision",
   "protocol_version": 1,
-  "schema_version": 2,
+  "schema_version": 3,
   "payload": {
     "request": {
       "contract_kind": "request",
@@ -15,7 +15,8 @@
         "acceptance_criteria": [
           "Every unsupported contract, protocol, or schema combination rejects",
           "Golden canonical bytes and digests stay fixed"
-        ]
+        ],
+        "depends_on": []
       }
     ]
   }

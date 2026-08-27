@@ -49,8 +49,8 @@ class WorkflowRevisionV1M7ReaderTests(unittest.TestCase):
             WorkflowRevisionV1(
                 request=RecordRef("request", "rec-request-1", REQUEST_DIGEST),
                 tasks=(
-                    TaskV1("task-1", "Objective for task-1", ("Criterion for task-1",)),
-                    TaskV1("task-2", "Objective for task-2", ("Criterion for task-2",)),
+                    TaskV1("task-1", "Objective for task-1", ("Criterion for task-1",), ()),
+                    TaskV1("task-2", "Objective for task-2", ("Criterion for task-2",), ()),
                 ),
             ),
         )

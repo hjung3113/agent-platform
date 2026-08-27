@@ -39,6 +39,7 @@ from kernel.lineage_store import (
 from kernel.protocol import (
     ContractKind,
     ParsedCandidate,
+    ProtocolRejected,
     ReaderOutcome,
     RecordRef,
     read_candidate,
@@ -53,6 +54,7 @@ from kernel.protocol_v1 import (
     RESULT_SNAPSHOT_EVIDENCE_CLASS,
     VerificationV1,
     WorkflowRevisionV1,
+    _validate_task_dependency_graph,
     schema_version_for_kind,
 )
 
@@ -105,6 +107,10 @@ class PublishRejectionCode(StrEnum):
     RUN_ALREADY_TERMINAL = "run_already_terminal"
     STALE_SCHEMA_VERSION = "stale_schema_version"
     WORKFLOW_REVISION_TASK_ID_DUPLICATE = "workflow_revision_task_id_duplicate"
+    WORKFLOW_REVISION_UNKNOWN_DEPENDENCY = "workflow_revision_unknown_dependency"
+    WORKFLOW_REVISION_SELF_DEPENDENCY = "workflow_revision_self_dependency"
+    WORKFLOW_REVISION_DUPLICATE_DEPENDENCY = "workflow_revision_duplicate_dependency"
+    WORKFLOW_REVISION_DEPENDENCY_CYCLE = "workflow_revision_dependency_cycle"
     ATTEMPT_TASK_BINDING_MISMATCH = "attempt_task_binding_mismatch"
     RESULT_ATTEMPT_BINDING_MISMATCH = "result_attempt_binding_mismatch"
     RESULT_ENVIRONMENT_BINDING_MISMATCH = "result_environment_binding_mismatch"
@@ -326,6 +332,32 @@ def _kind_binding_rejection(
                 PublishRejectionCode.WORKFLOW_REVISION_TASK_ID_DUPLICATE,
                 f"duplicate_task_ids={task_ids!r}",
             )
+        try:
+            _validate_task_dependency_graph(value.tasks)
+        except ProtocolRejected as rejection:
+            rejection_code = rejection.reason.split("=", 1)[0]
+            dependency_rejections = {
+                "workflow_revision_unknown_dependency": (
+                    PublishRejectionCode.WORKFLOW_REVISION_UNKNOWN_DEPENDENCY
+                ),
+                "workflow_revision_self_dependency": (
+                    PublishRejectionCode.WORKFLOW_REVISION_SELF_DEPENDENCY
+                ),
+                "workflow_revision_duplicate_dependency": (
+                    PublishRejectionCode.WORKFLOW_REVISION_DUPLICATE_DEPENDENCY
+                ),
+                "workflow_revision_dependency_cycle": (
+                    PublishRejectionCode.WORKFLOW_REVISION_DEPENDENCY_CYCLE
+                ),
+            }
+            try:
+                publish_rejection = dependency_rejections[rejection_code]
+            except KeyError:
+                raise RuntimeError(
+                    "workflow revision dependency validation failed: "
+                    f"{rejection.code}:{rejection.reason}"
+                ) from rejection
+            return Rejected(publish_rejection, rejection.reason)
         binding = verify_binding(value.request, _genesis_record_ref(run))
         if not binding.ok:
             return Rejected(

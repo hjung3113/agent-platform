@@ -28,6 +28,7 @@ TASK = TaskV1(
     task_id="task-cli-1",
     objective="Exercise the verifier subprocess",
     acceptance_criteria=("The verifier emits typed output",),
+    depends_on=(),
 )
 
 

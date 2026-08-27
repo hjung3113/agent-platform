@@ -27,6 +27,7 @@ TASK = TaskV1(
     task_id="task-m4-evidence",
     objective="Write the compiled Context Pack evidence file",
     acceptance_criteria=("Evidence file at {state}/context-evidence/",),
+    depends_on=(),
 )
 
 

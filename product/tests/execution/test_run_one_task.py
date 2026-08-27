@@ -23,6 +23,7 @@ class VerifierSubprocessTests(unittest.TestCase):
                 task_id="task-verifier-error",
                 objective="Exercise verifier diagnostics",
                 acceptance_criteria=("The child is invoked",),
+                depends_on=(),
             ),
             verifier_identity="verifier-test",
             expected_output_digest=IDENTITY,

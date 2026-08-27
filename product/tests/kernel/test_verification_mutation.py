@@ -46,6 +46,7 @@ TASK = TaskV1(
     task_id="task-m6-mutation",
     objective="Run the hardened mutation fixture",
     acceptance_criteria=("Criterion one", "Criterion two"),
+    depends_on=(),
 )
 REQUEST = RequestV1(
     objective="Exercise M6 through the real Host producer",
