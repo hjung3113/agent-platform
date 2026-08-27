@@ -895,9 +895,38 @@ this call (request ref can be a placeholder since `project_workflow_eligibility`
 each task rather than blindly calling it regardless. Any `WorkflowEligibilityRejected` raised here
 (including `WORKFLOW_REVISION_DIGEST_DIVERGENCE`, §4.2's cross-run digest-agreement check) must
 propagate as a typed driver-level failure, not be swallowed. Add an integration test: run task 1 to
-completion, then call `run_workflow()` again with task 1 replaced by a different task at the same
-`task_id` (same task_id, different `objective`/`acceptance_criteria` — a genuinely different tasks
-digest) — must raise divergence, not silently start a fresh, unrelated run.
+completion, then call `run_workflow()` again for the *same* `tasks` sequence with task 1's
+`RunState` mutated out-of-band into an order-violating shape (task 2 marked complete while task 1
+is not) — must raise `TASK_ORDER_VIOLATION` (§14.2), not silently proceed.
+
+**Correction — found by the implementing agent on first dispatch, not the review, same class as
+the §4.4 addendum above:** the original wording of this fix additionally required an integration
+test proving that calling `run_workflow()` again with task 1's *content changed* (different
+`objective`/`acceptance_criteria` under the same `task_id`) raises `WORKFLOW_REVISION_DIGEST_
+DIVERGENCE` rather than starting a fresh run. `codex --model gpt-5.6-luna -c
+model_reasoning_effort="max"` correctly stopped before writing code and reported that this cannot
+be made true under the lookup mechanism this same fix specifies: the per-task idempotency key
+*is* `content_digest({"tasks": [...]})` folded in (§4.2, §14.6) — changing task 1's content changes
+every downstream key, so `find_committed_run_for_idempotency_key` looks up a key that was never
+written and correctly returns "not found." There is no divergence signal to raise; the two
+sequences are, by this slice's own content-addressed design, two different workflows, not one
+workflow whose revision diverged. Requiring the "raise divergence" test was an error in this
+directive's own drafting, not a real gap in the implementation being planned.
+
+**Fixed by retraction, not by inventing new lookup machinery:** `_validate_revision_copies`'s
+cross-run digest-agreement check remains in `workflow_eligibility.py` (harmless, and it does still
+apply to `task_runs` maps assembled by *other* callers that do not derive their keys the same
+way this slice's driver does) but is **structurally unreachable from `run_workflow()`'s own
+call path** — every `task_runs` entry `run_workflow()` can ever assemble via
+`find_committed_run_for_idempotency_key` is, by construction of the key, already guaranteed to
+share the current `tasks` digest. This is the same class of documented, deliberately-kept dead
+scaffold as M4's `OmissionRecord`/optional-candidate machinery (see HANDOFF.md's carried-forward
+scope limits) — not a defect to route around with a new task_id-only cross-digest run index, which
+would be a real structural addition (a scan-all-runs-by-task_id index) out of this slice's bounded
+scope. Detecting "a caller changed task 1's content and calls it the same workflow" is not a
+guarantee this slice's content-addressed design makes or needs to make; nothing downstream depends
+on it. Revisit only if a later milestone gives workflows a persistent identity independent of task
+content (out of scope here, likely M7's own later steps or never).
 
 ### 14.4 [P1] `run_workflow()` reuses one `expected_output_digest` for every task
 
