@@ -1,5 +1,122 @@
 # Handoff
 
+## Completed this milestone (M7 — orchestration expansion, slice 1: linear multiple tasks, merged)
+
+M7 slice 1 designed, reviewed twice, implemented, fixed, and merged:
+[PR #49](https://github.com/hjung3113/agent-platform/pull/49) (squash-merged to `main` as
+`062c580`). Tracking [Issue #4](https://github.com/hjung3113/agent-platform/issues/4), per the
+[roadmap's M7 section](docs/plans/active/mvp-implementation-roadmap.md) (9-step expansion
+order; slice 1 covers only step 1, "linear multiple tasks").
+
+- **Plan**: [`docs/plans/active/m7-orchestration-expansion.md`](docs/plans/active/m7-orchestration-expansion.md),
+  drafted grounded in the real committed code (`kernel/protocol_v1.py`, `publish.py`,
+  `replay.py`, `execution/attempt.py`/`host.py`/`run_one_task.py`), not the roadmap's general
+  vocabulary. Explicit scope decision (§2): only expansion-order step 1, not steps 1–3
+  together — even step 1 alone requires a real schema-version bump (`WorkflowRevisionV1`
+  single `task` field → `tasks` tuple) and a structural choice about how a multi-task
+  Workflow Revision maps onto the existing one-task `lineage_store` run primitive. That
+  structural choice (§3) was escalated to the user rather than decided unilaterally: **Option
+  A** (keep the run primitive at one task unchanged; add a new outer pure-projection
+  eligibility function sequencing per-task runs sharing one admitted `tasks` sequence) vs.
+  Option B (change per-kind cardinality to `(kind, task_id)` inside one run, larger blast
+  radius across `publish.py`). User chose **Option A** — smallest blast radius, reuses M1's
+  run/lock/replay primitives completely unchanged.
+- **Review round 1** (pre-implementation, plan-doc review): `glm-5.3` (effort `high`, via
+  `opencode`, `--auto`) against the plan draft and the real committed code found **3 BLOCKER,
+  3 HIGH, 4 MEDIUM, 5 LOW** — every citation in the draft's baseline section verified accurate;
+  the findings were omissions in the change inventory, not fabricated claims. The three
+  BLOCKERs were the same class: the plan's inventory of code reading the old `revision.task`
+  field was incomplete — missed the `publish.py` VERIFICATION branch (crashes every v2
+  Verification publish), missed `execution/attempt.py` and `execution/host.py` (both also
+  read `revision.task`, and the draft falsely claimed `host.py` was "completely unchanged"),
+  and missed that `kernel/replay.py`'s fold had no branch for the retained legacy
+  single-`task` shape (pre-M7 history would silently replay to `workflow_revision=None`
+  instead of raising or preserving the value). All 15 findings were folded directly into the
+  plan's design sections (not just logged) — see the plan's §13 "Adversarial review log."
+- **Implementation dispatch, attempt 1 — blocked on a missing file, not a design issue:**
+  dispatched to `codex --model gpt-5.6-luna -c model_reasoning_effort="max"` (via `codex exec`,
+  non-interactive — the Orca-managed interactive TUI hit an unrelated `codex-update-prompt`
+  guard that blocks programmatic `terminal send` into that specific prompt) in a fresh Orca
+  worktree (`hjung3113/m7-orchestration-expansion-slice1`). Failed immediately: the plan doc
+  was uncommitted in the main checkout, so the fresh worktree (branched from `main`) never saw
+  it. Fixed by copying the plan file into the worktree checkout directly (still uncommitted —
+  this repo's rule is one Kernel/authoritative-publication writer, not a rule against
+  uncommitted planning docs, but the fix here was mechanical file placement, not a design
+  question).
+- **Implementation dispatch, attempt 2 — a real design contradiction the review missed,
+  caught by the implementing agent, not guessed around:** `luna` correctly stopped before
+  writing any code and reported: the plan's post-BLOCKER-fix §4.4 claimed every per-task run
+  commits an *identical* `WorkflowRevisionV1` record (byte-for-byte) across the whole
+  workflow — but `_kind_binding_rejection`'s `WORKFLOW_REVISION` branch
+  (`publish.py:322–328`, unchanged, already spot-checked accurate by round 1's review)
+  requires each candidate's `request` field to bind to *that run's own* genesis Request. Since
+  every per-task run has a distinct genesis Request (distinct `record_id`), an identical
+  record could never actually publish into more than one run — `GENESIS_REQUEST_BINDING_MISMATCH`
+  on the second run, every time. Not escalated to the user as an architecture decision (unlike
+  M6 round 2's spec-retraction question) because there was no real tradeoff: fixed directly in
+  the plan (§4.2–§4.4, addendum in §13) — what's shared identically across per-task runs is
+  the `tasks` sequence and a `tasks`-only sub-digest, not the whole record; each run binds its
+  own genesis Request as it always would. `run_one_task`'s new parameter renamed
+  `admitted_tasks: tuple[TaskV1, ...] | None` (a bare tasks tuple, not a full revision record)
+  to make this structurally obvious rather than re-inviting the same mistake.
+- **Implementation dispatch, attempt 3 — landed clean:** same `luna` max dispatch, corrected
+  plan copied into the worktree. Commit `a4f6121` (worktree
+  `m7-orchestration-expansion-slice1`, based on `a07e56a`), one commit, 30 files changed. **386
+  tests green** (contracts 152, kernel 125, execution 102, verification 7 — up from 357
+  pre-M7) + `compileall`, independently re-run outside the implementation session by the
+  orchestrator, matching every prior milestone's discipline. Spot-checked the critical fix
+  (`run_one_task.py`'s `admitted_tasks` parameter, not a shared revision record) against the
+  corrected plan text — matches exactly.
+- **Round 2 (post-implementation review, PR #49):** opened PR #49 for `a4f6121`. Dispatching a
+  manual `glm-5.3`-via-`opencode` review round hit an account-balance error (`Insufficient
+  balance or no resource package`) before it could run — no findings from that path. Instead,
+  GitHub's `chatgpt-codex-connector` auto-review (2 inline P1/P2 findings) plus a manual
+  adversarial pass by the repo owner directly on the PR (4 more findings, all P1 except one P2)
+  found **6 real defects, all against this slice's own core guarantee** ("strict ordered
+  multi-task execution," not later-slice behavior) — none required a protocol/contract schema
+  change: (1) eligibility trusted the caller-supplied `task_runs` mapping key instead of
+  checking a run's own committed `attempt_packet.task_id`, letting a swapped run silently pass
+  as the wrong task's completion; (2) eligibility never checked for out-of-order committed
+  work, silently normalizing a later task's completion before an earlier one; (3) the
+  fail-closed eligibility/divergence projection existed but was never called from
+  `run_workflow()`'s real execution path — it just looped tasks unconditionally; (4)
+  `run_workflow()` reused one `expected_output_digest` across every task, so no real
+  (non-`noop`) multi-task workflow could verify correctly; (5, codex) crash-resume rebuilt and
+  republished the Attempt Packet from a possibly-mutated workspace before checking for an
+  already-committed one, guaranteeing `IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_CONTENT` on resume
+  after a Result-stage crash; (6, codex) the per-task idempotency key omitted the Request's own
+  identity, so two distinct Requests decomposing into an identical task sequence would collide.
+  All 6 folded into the plan doc's new §14, with fix directives, before dispatching
+  implementation — same discipline as every prior milestone's review round.
+- **Implementation dispatch, attempt 1 — a real contradiction in the fix directive itself,
+  caught by the implementing agent, not guessed around:** `codex --model gpt-5.6-luna -c
+  model_reasoning_effort="max"` stopped before writing any code and reported that §14.3's
+  required regression test ("re-invoking `run_workflow` with task 1's content changed must raise
+  `WORKFLOW_REVISION_DIGEST_DIVERGENCE`") could never pass under the very lookup mechanism that
+  same fix specifies: the per-task idempotency key is itself derived from the tasks-sequence
+  content digest, so changing task 1's content changes every downstream key — the lookup
+  correctly finds nothing, because a changed sequence is a different workflow by this slice's
+  own content-addressed design, not a divergent copy of the same one. This was an error in the
+  review directive's own drafting (an over-specified test), not a real implementation gap.
+  Corrected directly in the plan (§14.3), same "no real tradeoff, fix in place" precedent as the
+  first implementation round's §4.4 addendum: kept the real ordering/identity guarantees
+  (§14.1/§14.2), retracted only the unsatisfiable divergence-on-changed-content test, and noted
+  the underlying cross-run digest-agreement check is now structurally unreachable from
+  `run_workflow()`'s own call path — same class of documented, deliberately-kept dead scaffold
+  as M4's `OmissionRecord` (see "Explicit scope limits" below).
+- **Implementation dispatch, attempt 2 — landed clean:** same `luna` max dispatch, corrected
+  plan re-read mid-run per an explicit note in the redispatch prompt. Commit `2b8f2f9`, 6 files
+  changed. **395 tests green** (contracts 152, kernel 130, execution 106, verification 7, up
+  from 386) + `compileall`, independently re-run outside the implementation session. Diff
+  spot-checked against all 6 fixes (§14.1–§14.6) before committing — matches exactly. Pushed to
+  PR #49; PR comment posted explaining the round-2 fix and the §14.3 correction.
+- **Merged**: PR #49 squash-merged to `main` as `062c580` after user confirmation (repo has no
+  CI configured to wait on). Worktree (`m7-orchestration-expansion-slice1`) and local feature
+  branch cleaned up (force-removed/force-deleted — squash-merge history isn't fast-forward-
+  detectable by git, content confirmed present in `main` first). One stale untracked copy of
+  the plan doc in the main checkout (predating this session, never committed) was removed
+  before pulling — the merged, final §14-inclusive version is now the tracked one.
+
 ## Completed earlier this milestone (M6 — verification/evidence hardening, merged)
 
 M6 implemented and merged: [PR #48](https://github.com/hjung3113/agent-platform/pull/48)
@@ -189,18 +306,35 @@ python3.12 -m compileall -q product/src product/tests                           
 - M1 — Kernel authoritative publication and replay spine, PR #41. See prior handoff commits
   for full detail if needed.
 
-## Next session — start M7 (orchestration expansion)
+## Next session — start M7 slice 2 (roadmap expansion-order step 2: DAG dependency validation)
 
-M6 is fully done: designed, implemented, reviewed three rounds (pre-implementation manual,
-post-implementation automated, post-implementation manual), all findings fixed, merged to
-`main`. Next scope is M7 (orchestration expansion — retry/repair/replan, fan-in, safe
-parallelism, multi-task DAG, Reviewer/Verifier split per ADR-0009), which several of M6's
-explicit scope limits (plan §11 — genuine verifier-environment independence, cross-run
-Finding lifecycle, stale/flaky/retry evidence) are deferred to, and where M3's per-task
-capability-requirement gap (below) likely gets closed. Start with the same pattern M3–M6
-used: draft a plan grounded in the real committed code (not the roadmap's general
-vocabulary), run a pre-implementation adversarial review round before dispatching
-implementation.
+M7 slice 1 is fully landed on `main` (`062c580`) — see "Completed this milestone" above. Next
+session should start the next expansion-order slice per the roadmap's 9-step M7 plan: step 2,
+DAG dependency validation. Same discipline as slice 1: a plan doc grounded in the real
+committed code (not roadmap vocabulary), a pre-implementation adversarial review round, then
+implementation, then a post-implementation review round before merge — do not batch step 2
+with step 3 (resource claims) or later steps into one slice, per the roadmap's own "do not
+implement a later step merely because Spec 04 names it" rule, which slice 1's plan (§2) already
+applied once and which slice 1's own round-2 review (§14) reinforced by finding real defects
+even within a single already-narrow slice.
+
+One thing worth deciding early in slice 2's plan: `workflow_eligibility.py`'s linear
+`for task in tasks: ... continue if complete` projection (and `run_workflow()`'s
+sequential-index materialization loop) both assume a strictly linear order — DAG dependency
+validation will need a real design decision about whether that module gets extended in place or
+whether dependency-graph eligibility becomes a separate function/module. Don't assume either
+way going in.
+
+Also worth noting for slice 2's own review round: the `zai/glm-5.3` opencode-dispatched manual
+review path hit an account-balance error this round (`Insufficient balance or no resource
+package`) and was skipped in favor of GitHub's automated review + a direct manual pass on the
+PR. Check whether that balance issue is still live before assuming that review path is
+available again.
+
+Also still pending, named explicitly in the M7 slice 1 plan as deferred rather than dropped
+(plan §11): ADR-0009's Reviewer/Verifier split (blocked on risk-tier/Plan-Check machinery that
+doesn't exist anywhere yet) and M3's per-task capability-requirement gap (below) — both
+"likely" M7 territory per the roadmap, not committed to any specific future slice yet.
 
 ## Explicit scope limits carried forward from M3/M4 (not gaps to silently close later)
 
@@ -262,10 +396,11 @@ when a concrete milestone need makes one of these load-bearing:
 - #5 verification/evidence soundness — **done, M6 merged** (hardened criterion/evidence
   policy, execution-provenance independence, self-verification closed by real distinct
   process identity rather than M2's string inequality).
-- #4 deterministic orchestration after replay/authoritative state is stable (M7 — retry/
-  repair/replan, fan-in, safe parallelism, multi-task DAG, Reviewer/Verifier split per
-  ADR-0009; also where M3's per-task capability-requirement gap above likely gets closed;
-  M4's `lineage`/`observed` source classes stay structurally empty until M7 gives them real
+- #4 deterministic orchestration after replay/authoritative state is stable (M7 — **slice 1
+  (linear multiple tasks) done, merged PR #49**; remaining: DAG dependency validation, resource
+  claims, retry/repair/replan, fan-in, safe parallelism, Reviewer/Verifier split per ADR-0009;
+  also where M3's per-task capability-requirement gap above likely gets closed; M4's
+  `lineage`/`observed` source classes stay structurally empty until M7 gives them real
   predecessors/tool output).
 - #24 skill supply-chain (M10) after core Kernel/runtime boundaries are executable.
 - #9/#25 compatibility registry, historical cross-version rule provenance, retained-lineage
