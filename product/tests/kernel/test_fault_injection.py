@@ -63,14 +63,16 @@ def dispatch_workflow(
         {
             "contract_kind": "workflow_revision",
             "protocol_version": 1,
-            "schema_version": 1,
+            "schema_version": 2,
             "payload": {
                 "request": parent.to_canonical_value(),
-                "task": {
-                    "task_id": task_id,
-                    "objective": "Prove commit-before-projection ordering",
-                    "acceptance_criteria": ["Replay recovers authority"],
-                },
+                "tasks": [
+                    {
+                        "task_id": task_id,
+                        "objective": "Prove commit-before-projection ordering",
+                        "acceptance_criteria": ["Replay recovers authority"],
+                    }
+                ],
             },
         }
     )

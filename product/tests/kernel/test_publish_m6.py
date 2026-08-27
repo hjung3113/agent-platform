@@ -55,11 +55,13 @@ def workflow_candidate(parent: RecordRef, criteria: list[str]) -> ParsedCandidat
         "workflow_revision",
         {
             "request": parent.to_canonical_value(),
-            "task": {
-                "task_id": "task-m6",
-                "objective": "Exercise hardened evidence publication",
-                "acceptance_criteria": criteria,
-            },
+            "tasks": [
+                {
+                    "task_id": "task-m6",
+                    "objective": "Exercise hardened evidence publication",
+                    "acceptance_criteria": criteria,
+                }
+            ],
         },
     )
 

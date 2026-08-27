@@ -6,11 +6,11 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from kernel.protocol import ParsedCandidate, read_candidate
+from kernel.protocol import ContractKind, ParsedCandidate, read_candidate
 from kernel.protocol_v1 import (
     PROTOCOL_VERSION,
-    SCHEMA_VERSION,
     RequestV1,
+    schema_version_for_kind,
     TaskV1,
     WorkflowRevisionV1,
 )
@@ -31,6 +31,11 @@ TASK = TaskV1(
     objective="Prove real attempt-packet identities bind to published records",
     acceptance_criteria=("The Attempt Packet binds to the published Workflow Revision",),
 )
+SECOND_TASK = TaskV1(
+    task_id="task-attempt-second",
+    objective="Prove a later task can bind to the same revision",
+    acceptance_criteria=("The later task is selected by task_id",),
+)
 
 
 def _as_candidate(contract_kind: str, typed: Any) -> ParsedCandidate:
@@ -38,7 +43,7 @@ def _as_candidate(contract_kind: str, typed: Any) -> ParsedCandidate:
         {
             "contract_kind": contract_kind,
             "protocol_version": PROTOCOL_VERSION,
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": schema_version_for_kind(ContractKind(contract_kind)),
             "payload": typed.to_canonical_value(),
         }
     )
@@ -86,7 +91,7 @@ class AttemptPacketRealIdentityTest(unittest.TestCase):
         )
         workflow_value = WorkflowRevisionV1(
             request=request_published.record_ref,
-            task=TASK,
+            tasks=(TASK, SECOND_TASK),
         )
         workflow_published = _require_published(
             publish(
@@ -204,6 +209,39 @@ class AttemptPacketRealIdentityTest(unittest.TestCase):
                 state=self.state,
                 run_id=self.run_id,
                 task=mutated_task,
+                workspace_root=self.root,
+                opencode_binary_path=str(FIXTURE_BINARY),
+            )
+
+    def test_multi_task_revision_selects_the_bound_task(self) -> None:
+        packet = build_attempt_packet(
+            workflow_revision_ref=self.workflow_revision_ref,
+            task_id=SECOND_TASK.task_id,
+            implementer_identity="impl-1",
+            state=self.state,
+            run_id=self.run_id,
+            task=SECOND_TASK,
+            workspace_root=self.root,
+            opencode_binary_path=str(FIXTURE_BINARY),
+        )
+
+        self.assertEqual(packet.task_id, SECOND_TASK.task_id)
+
+    def test_unknown_task_id_in_multi_task_revision_rejects(self) -> None:
+        unknown = TaskV1(
+            task_id="task-attempt-unknown",
+            objective="This task is not admitted",
+            acceptance_criteria=("It must not bind",),
+        )
+
+        with self.assertRaises(attempt_module.TaskBindingMismatchError):
+            build_attempt_packet(
+                workflow_revision_ref=self.workflow_revision_ref,
+                task_id=unknown.task_id,
+                implementer_identity="impl-1",
+                state=self.state,
+                run_id=self.run_id,
+                task=unknown,
                 workspace_root=self.root,
                 opencode_binary_path=str(FIXTURE_BINARY),
             )

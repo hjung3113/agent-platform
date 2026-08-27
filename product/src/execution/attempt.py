@@ -80,12 +80,20 @@ def build_attempt_packet(
             "workflow_revision_ref binding mismatch: "
             f"caller_ref={workflow_revision_ref} committed_ref={revision_ref}"
         )
-    if revision.task.task_id != task_id:
+    bound_task = next(
+        (
+            candidate
+            for candidate in getattr(revision, "tasks", ())
+            if candidate.task_id == task_id
+        ),
+        None,
+    )
+    if bound_task is None:
         raise TaskBindingMismatchError(
-            f"task_id argument {task_id!r} disagrees with the committed "
-            f"Workflow Revision's task_id {revision.task.task_id!r}"
+            f"task_id argument {task_id!r} is not present in the committed "
+            "Workflow Revision's tasks"
         )
-    committed_task_digest = content_digest(revision.task.to_canonical_value())
+    committed_task_digest = content_digest(bound_task.to_canonical_value())
     caller_task_digest = content_digest(task.to_canonical_value())
     if committed_task_digest != caller_task_digest:
         raise TaskBindingMismatchError(

@@ -6,7 +6,7 @@
     "attempt": {
       "contract_kind": "attempt_packet",
       "record_id": "rec-attempt-0001",
-      "content_digest": "sha256:agent-platform-json-v1:f9843145310f3c1ab01d6d70dc456df1cff65b8251c8bfe58a3dd2439f477b2e"
+      "content_digest": "sha256:agent-platform-json-v1:f410e0d4fadff8ffc4d1404f8b8a63bdbd252bc6c66a1b3f7b22d27228cd7f75"
     },
     "output_snapshot_digest": "sha256:agent-platform-json-v1:162495ee90155423030f305bc49c79851391e2d3d8b7180cea2f9ab592c3a1ad",
     "observation": {

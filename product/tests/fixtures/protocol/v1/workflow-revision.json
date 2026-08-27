@@ -1,20 +1,22 @@
 {
   "contract_kind": "workflow_revision",
   "protocol_version": 1,
-  "schema_version": 1,
+  "schema_version": 2,
   "payload": {
     "request": {
       "contract_kind": "request",
       "record_id": "rec-request-0001",
       "content_digest": "sha256:agent-platform-json-v1:10433089bff3b518472003861531f9ddf2edceb2da0d6f5d56d96f63f4fe213c"
     },
-    "task": {
-      "task_id": "task-m0-1",
-      "objective": "Land the M0 protocol foundation slice",
-      "acceptance_criteria": [
-        "Every unsupported contract, protocol, or schema combination rejects",
-        "Golden canonical bytes and digests stay fixed"
-      ]
-    }
+    "tasks": [
+      {
+        "task_id": "task-m0-1",
+        "objective": "Land the M0 protocol foundation slice",
+        "acceptance_criteria": [
+          "Every unsupported contract, protocol, or schema combination rejects",
+          "Golden canonical bytes and digests stay fixed"
+        ]
+      }
+    ]
   }
 }

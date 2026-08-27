@@ -158,7 +158,7 @@ class VerificationMutationTests(unittest.TestCase):
         assert isinstance(request_published, Published)
         workflow_value = WorkflowRevisionV1(
             request=request_published.record_ref,
-            task=TASK,
+            tasks=(TASK,),
         )
         workflow_published = publish(
             self.state,

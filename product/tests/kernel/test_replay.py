@@ -53,14 +53,16 @@ def dispatch_workflow(
         {
             "contract_kind": "workflow_revision",
             "protocol_version": 1,
-            "schema_version": 1,
+            "schema_version": 2,
             "payload": {
                 "request": parent.to_canonical_value(),
-                "task": {
-                    "task_id": task_id,
-                    "objective": "Fold the committed records",
-                    "acceptance_criteria": ["Replay is deterministic"],
-                },
+                "tasks": [
+                    {
+                        "task_id": task_id,
+                        "objective": "Fold the committed records",
+                        "acceptance_criteria": ["Replay is deterministic"],
+                    }
+                ],
             },
         }
     )
@@ -421,6 +423,40 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(state.verification.verdict, "PASS")
         self.assertEqual(state.verification.findings, ())
         self.assertFalse(state.terminal)
+
+    def test_legacy_v1_workflow_revision_replays_its_folded_value(self) -> None:
+        genesis = publish(self.state, None, dispatch_request(), None, "key-legacy-request")
+        self.assertIsInstance(genesis, Published)
+        assert isinstance(genesis, Published)
+        candidate = {
+            "contract_kind": "workflow_revision",
+            "protocol_version": 1,
+            "schema_version": 1,
+            "payload": {
+                "request": genesis.record_ref.to_canonical_value(),
+                "task": {
+                    "task_id": "legacy-task",
+                    "objective": "Replay a pre-M7 Workflow Revision",
+                    "acceptance_criteria": ["The legacy value is preserved"],
+                },
+            },
+        }
+        parsed = read_candidate(candidate)
+        self.assertTrue(parsed.ok, parsed.reason)
+        sequence = 2
+        record = {
+            "run_id": genesis.run_id,
+            "sequence": sequence,
+            "record_id": f"{genesis.run_id}:{sequence:010d}",
+            "content_digest": content_digest(candidate),
+            "idempotency_key": "legacy-workflow-fixture",
+            "candidate": candidate,
+        }
+        run_dir = Path(self.state) / "runs" / genesis.run_id
+        (run_dir / f"{sequence:010d}.json").write_bytes(canonical_json_bytes(record))
+
+        state = replay(self.state, genesis.run_id)
+        self.assertEqual(state.workflow_revision, parsed.value.value)
 
     def test_legacy_v1_result_record_replays_after_result_schema_bump(self) -> None:
         genesis = publish(self.state, None, dispatch_request(), None, "key-1")

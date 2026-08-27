@@ -6,7 +6,7 @@
     "result": {
       "contract_kind": "result",
       "record_id": "rec-result-0001",
-      "content_digest": "sha256:agent-platform-json-v1:9619e03c6f64169353ad7af2e4e3606659e26612888179b3025cc326bea3a6d5"
+      "content_digest": "sha256:agent-platform-json-v1:240bf027df6f2ab6eee31a3a20bd9f27e81561e5312ff02a8e625c51e461b5aa"
     },
     "verifier_identity": "stub-verifier-m2",
     "verifier_execution_identity": "sha256:agent-platform-json-v1:2222222222222222222222222222222222222222222222222222222222222222",

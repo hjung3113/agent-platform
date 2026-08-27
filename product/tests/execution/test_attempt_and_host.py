@@ -9,7 +9,6 @@ from typing import Any
 from kernel.protocol import ContractKind, ParsedCandidate, RecordRef, read_candidate
 from kernel.protocol_v1 import (
     PROTOCOL_VERSION,
-    SCHEMA_VERSION,
     ReceiptV1,
     RequestV1,
     TaskV1,
@@ -18,6 +17,7 @@ from kernel.protocol_v1 import (
     read_attempt_packet_v1,
     read_receipt_v1,
     receipt_v1_content_digest,
+    schema_version_for_kind,
 )
 from kernel.publish import Published, Rejected, publish
 from execution import context_compiler
@@ -43,7 +43,7 @@ def _as_candidate(contract_kind: str, typed: Any) -> ParsedCandidate:
         {
             "contract_kind": contract_kind,
             "protocol_version": PROTOCOL_VERSION,
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": schema_version_for_kind(ContractKind(contract_kind)),
             "payload": typed.to_canonical_value(),
         }
     )
@@ -102,7 +102,7 @@ class BuildAttemptPacketTest(unittest.TestCase):
                     "workflow_revision",
                     WorkflowRevisionV1(
                         request=request_published.record_ref,
-                        task=task,
+                        tasks=(task,),
                     ),
                 ),
                 request_published.record_ref,
