@@ -985,3 +985,766 @@ All 6 fixes above are bounded to `kernel/workflow_eligibility.py`, `kernel/publi
 read-only helper), and `execution/run_one_task.py` — no protocol/contract schema version bump, no
 change to `_kind_binding_rejection`'s existing genesis-binding check. Dispatched for implementation
 in the same worktree (`m7-orchestration-expansion-slice1`) on top of `a4f6121`.
+
+---
+
+# M7 — Slice 2: DAG Dependency Validation and Deterministic Eligibility
+
+Status: **Draft, not yet reviewed** (pre-implementation adversarial review pending)
+Tracker: Issue #4 (same tracker as slice 1)
+Milestone: **M7, slice 2 of N** — roadmap expansion-order step 2 only
+
+Slice 1 (above) landed and merged (`062c580`) as a strictly linear multi-task Workflow Revision:
+ordering is pure array position, "dependency" means only "comes after the previous array index."
+This slice implements the roadmap's step 2 — **DAG dependency validation and deterministic
+eligibility** — and nothing past it. All baseline citations below are checked against `main` at
+`df89f48` (post-slice-1-merge HEAD), not the roadmap's general vocabulary.
+
+## S1. Scope decision: only step 2, not step 3 or later
+
+The roadmap's M7 section (`mvp-implementation-roadmap.md` lines 323–341) explicitly separates
+step 2 ("DAG dependency validation and deterministic eligibility") from step 3 ("logical Resource
+Claims with read/write conflict semantics") and warns against implementing a later step merely
+because Spec 04 names it in the same paragraph as the Workflow Revision contract's full field
+list (`docs/specs/04-workflow-orchestration.md` lines 9–15, which names dependency edges,
+resource claims, risk/policy, retry/repair/replan limits, and fan-in policy all in one bulleted
+contract). This slice implements **only** the dependency-edge and eligibility-set bullets. It
+does **not** add a resource-claim field, a risk/policy field, retry/repair/replan machinery, or a
+fan-in merge-policy field to `TaskV1`/`WorkflowRevisionV1` — those remain exactly as absent as
+slice 1 left them (verified: `grep -rn "resource_claim\|risk_profile\|admitted_policy\|fan_in" product/src/` returns nothing).
+
+**Slice 2 proves:** an admitted Workflow Revision's tasks can declare explicit dependency edges
+(not just array position); Kernel admission rejects unknown task references, self-dependencies,
+structural cycles, and duplicate/ambiguous edges for the same task, at the same admission
+boundary slice 1 used for duplicate `task_id` (reader + publish-time defense-in-depth); the
+eligibility projection computes a real **eligible set** (every task whose dependencies are all
+satisfied) and a deterministic tie-break **next action** over that set, per Spec 04's "the
+eligible task set must be identical... task ordering must be identical... the selected next
+action must be identical" (`04-workflow-orchestration.md` lines 29–34); and a task whose
+dependency chain includes a `FAIL`/`BLOCKED` ancestor is correctly reported blocked rather than
+silently treated as still-pending or skipped.
+
+**It does not prove:** resource-claim conflict detection (step 3); retry/repair/replan (steps
+4–6); fan-in merge policy (step 7, though DAG admission does allow a task to declare more than
+one dependency, i.e. converging edges — see S3's explicit note on why this is not fan-in);
+reconciliation-required handling (step 8); or concurrent execution of independent-branch tasks
+(step 9 — this slice's driver stays strictly sequential, one task materialized at a time, exactly
+like slice 1, even though the DAG shape now permits more than one task to be simultaneously
+eligible in principle).
+
+## S2. Baseline (verified against `main` at `df89f48`)
+
+- `kernel/protocol_v1.py:118–128` (`TaskV1`) — exactly `task_id`, `objective`,
+  `acceptance_criteria`. No dependency-edge field of any kind.
+- `kernel/protocol_v1.py:131–141` (`WorkflowRevisionV1`) — `request: RecordRef; tasks:
+  tuple[TaskV1, ...]`. Ordering is purely array position; nothing in the schema states or
+  enforces a dependency relationship between tasks beyond "index i precedes index i+1" as
+  encoded in `workflow_eligibility.py`'s positional check (below).
+- `kernel/protocol_v1.py:33` — `WORKFLOW_REVISION_SCHEMA_VERSION = 2` (slice 1's bump from the
+  pre-M7 single-`task` shape). `kernel/protocol_v1.py:1167–1172` registers
+  `read_workflow_revision_v1` at `(WORKFLOW_REVISION, 1, 2)`; `:1160–1166` retains
+  `read_legacy_workflow_revision_v1` at `(WORKFLOW_REVISION, 1, 1)`, rejecting a `"tasks"` key
+  with `UNSUPPORTED_SCHEMA_VERSION`. This is the exact precedent slice 2 reuses for its own
+  schema bump (S4).
+- `kernel/protocol_v1.py:528–545` (`_require_task_sequence`) — validates non-empty list, calls
+  `_read_task_v1` per element, rejects duplicate `task_id` within the sequence
+  (`MALFORMED_PAYLOAD`). This is the reader-level structural-validation idiom slice 2's
+  dependency-graph checks extend (S4).
+- `kernel/publish.py:322–335` (`_kind_binding_rejection`'s `WORKFLOW_REVISION` branch) —
+  currently re-checks duplicate `task_id` as publish-time defense-in-depth (`:323–328`, same rule
+  as the reader, checked at both layers — M1's stated precedent, restated by slice 1 §4.5) before
+  the genesis-Request binding check (`:329–334`). No dependency-graph check exists here yet.
+- `kernel/workflow_eligibility.py` (full file, 204 lines) — `project_workflow_eligibility`
+  computes a per-task `_state_kind` (`not_started`/`in_flight`/`fail`/`blocked`/`complete`), then
+  a **positional** order-violation check (`for index, kind in enumerate(state_kinds): if kind !=
+  "not_started" and any(earlier_kind != "complete" for earlier_kind in state_kinds[:index])`,
+  lines 182–189) — "earlier" means "lower array index," not "declared dependency" — then returns
+  the first non-complete task in array order as `NEXT_TASK`, or the first `fail`/`blocked` task
+  as `WORKFLOW_BLOCKED`. `WorkflowEligibility` (lines 43–61) exposes a single `task`, not a set.
+  `_validate_revision_copies` (lines 85–102) is the unchanged cross-run digest-agreement check
+  from slice 1 (§4.2 of the slice-1 plan) — it compares whole-`tasks`-sequence digests and is
+  unaffected by adding a field to `TaskV1`, since it will still digest whatever `TaskV1.
+  to_canonical_value()` returns, tested by S9.
+- `execution/run_one_task.py:510–610` (`run_workflow`) — the driver's `while True` loop
+  recomputes `project_workflow_eligibility` every iteration (good — this generalizes to DAGs
+  without change), but on `NEXT_TASK` it does `eligible_index = task_ids.index(eligibility.task
+  .task_id); for index in range(eligible_index + 1): materialize(index)` (lines 607–610), and on
+  `WORKFLOW_BLOCKED` it does the same up to and including the blocked index (lines 596–600).
+  **Both loops assume array index implies "everything before it is already done or must be
+  materialized in that order"** — true only under slice 1's strict linear semantics. Under a DAG
+  this is actively wrong: task 3 could be array-index 1 (declared early) but depend on task 5
+  (declared late), and materializing "every index up to the eligible one" would try to run tasks
+  the eligible task does not actually depend on, out of dependency order, before their own
+  dependencies are satisfied. This must change (S5).
+- `kernel/replay.py` — the `WORKFLOW_REVISION` fold branch (merged with
+  `_LegacyWorkflowRevisionV1` per slice 1 §4.6) folds whatever `WorkflowRevisionV1`/
+  `_LegacyWorkflowRevisionV1` value is committed, unchanged by content shape — adding a field to
+  `TaskV1` needs no replay-fold change, only a schema-version-aware reader change (S4), the same
+  way slice 1 added `tasks` without touching the fold's dispatch structure beyond the one new
+  `isinstance` arm.
+- `docs/specs/04-workflow-orchestration.md` lines 6–34 — normative source for S3/S5's design
+  (dependency edges, admission rejection list, eligible-set/ordering/next-action determinism,
+  dependency-satisfaction-by-explicit-condition-only).
+- ADR-0009 and `execution/policy.py`'s fixed global capability table — **rechecked, still zero
+  risk-tier/Plan-Check code anywhere in `product/src/`** (same grep as slice 1 §1, re-run against
+  current HEAD, same empty result). DAG dependency validation does not require risk-tier
+  computation — a dependency edge is a structural fact about task ordering, not a policy
+  judgement — so ADR-0009's split stays deferred for the same reason slice 1 deferred it,
+  unaffected by this slice.
+
+## S3. Design decision: `TaskV1.depends_on`, resolved in-plan (not escalated)
+
+**The question:** does `workflow_eligibility.py` get extended in place, or does DAG eligibility
+become a separate module, per `HANDOFF.md`'s explicit "don't assume either way going in"?
+
+**Resolution:** extend in place — not a genuine architecture fork, because the module's own
+docstring already states its real contract at the right level of abstraction: "reads only an
+admitted task sequence and replayed per-task lineage" and "does not publish records, inspect
+runtime state, or mutate a derived cache" (`workflow_eligibility.py:1–6`). Nothing about that
+contract is linear-specific — `_state_kind` (per-task terminal-state classification),
+`_validate_revision_copies` (cross-run digest agreement), and the overall pure-projection shape
+are unchanged by moving from "index i precedes i+1" to "task A precedes task B iff B declares A
+in `depends_on`." Only the order-violation check and the eligible/next-task selection logic
+change. A separate module would duplicate `_state_kind`/`_validate_revision_copies` or import
+them from the "linear" module under a name that no longer describes what it does — worse on both
+AGENTS.md rule 1 (reuse before invention) and rule 13 (smallest mechanism). The module is
+renamed in its docstring only (not its filename or public function names, which are already
+generic — `project_workflow_eligibility`, not `project_linear_eligibility`) to describe DAG
+projection instead of linear projection.
+
+**The dependency field:** `TaskV1` gains `depends_on: tuple[str, ...]` — each element a
+`task_id` string referencing another task in the same `WorkflowRevisionV1.tasks` sequence.
+Order within `depends_on` is declaration order (digested as given, like `acceptance_criteria` —
+no canonicalization/sorting is applied, so two revisions listing the same dependency set in a
+different order are legitimately different committed content with different digests; this is
+consistent with every other tuple-shaped field in this protocol and is not a new inconsistency
+slice 2 introduces). A task with an empty `depends_on` tuple has no dependencies (eligible as
+soon as `not_started`, same as every slice-1 task).
+
+**Converging edges are allowed, and this is explicitly not fan-in (step 7):** a task may name
+more than one entry in `depends_on` (e.g. task C depends on both A and B). Spec 04 requires "an
+explicit admitted completion condition" per edge — for this slice, the completion condition for
+every edge is simply "the named task's per-task run is terminal-`complete`" (dependency
+satisfaction is boolean-AND across `depends_on`, no partial-success or artifact-level condition).
+This is deliberately not fan-in: fan-in (Spec 04 lines 36–45, "Dependency and fan-in semantics")
+requires a declared **merge
+strategy**, **conflict behavior**, and **an authority responsible for producing a merged
+candidate** when multiple upstream *results* must be combined into one artifact/decision. Slice 2
+adds no merge-strategy field, no conflict-behavior field, and does not attempt to combine
+task C's upstream Results into anything — C's own Attempt/Result/Verification chain runs exactly
+as any slice-1 task's does, using C's own workspace and its own task objective/acceptance
+criteria; C merely cannot start until A and B are both `complete`. Recorded explicitly per this
+plan's own "not silently dropped" discipline.
+
+**Named Spec 04 conformance deviations (added after round-1 review, MEDIUM-2 — three normative
+readings this slice fixes rather than leaves implicit, per slice 1 §11 MEDIUM 3's own
+named-deviation discipline and roadmap Lens E's "resolve normative contradictions in the design
+doc, not as local guesses"):**
+
+1. Spec 04 line 11/34's "deterministic ordering/tie-break metadata" is satisfied by the revision's
+   own `tasks` array order — this slice adds no separate tie-break field. The ordered tuple *is*
+   the revision-bound canonical ordering; array position was already load-bearing for slice 1's
+   identical requirement and nothing about a DAG changes that.
+2. Spec 04 line 10/37's per-edge "dependency satisfaction condition" is fixed at the protocol
+   version level (schema v3) to a single universal condition — "the named predecessor's per-task
+   run is terminal-`complete`" — rather than being admitted per-edge contract content. No
+   candidate can express a different condition for a different edge this slice.
+3. Spec 04 line 17's "incompatible graph references" admission-rejection case is vacuously
+   satisfied for this slice: `depends_on` entries are intra-revision `task_id` strings only, with
+   no cross-revision or external reference expressible at all, so there is no reference shape that
+   could be "incompatible" beyond the four cases S4 already rejects (unknown, self, duplicate,
+   cyclic).
+
+## S4. Contract shape change
+
+`TaskV1` (`protocol_v1.py:118–128`) gains `depends_on: tuple[str, ...]`. `to_canonical_value()`
+adds `"depends_on": list(self.depends_on)`. Because `TaskV1` is only ever read as part of a
+`WorkflowRevisionV1` payload (never published standalone), the shape change is versioned the same
+way slice 1 versioned the `task` → `tasks` change: bump `WORKFLOW_REVISION_SCHEMA_VERSION` from
+`2` to `3`, add `read_workflow_revision_v1_v3` (or extend the existing function name — naming
+follows whatever convention the implementer finds already established; the substance is a new
+reader registered at `(WORKFLOW_REVISION, 1, 3)`), and retain the current `read_workflow_revision_v1`
+(today's v2 reader, no `depends_on`) at `(WORKFLOW_REVISION, 1, 2)` as the new legacy reader for
+that version — following the exact `read_legacy_workflow_revision_v1` precedent already in the
+file (a v2-schema payload carrying a `"depends_on"` key inside any task object is rejected
+`UNSUPPORTED_SCHEMA_VERSION`, mirroring `read_legacy_workflow_revision_v1`'s existing `"tasks"`-key
+check at the v1→v2 boundary). `kernel/replay.py`'s fold needs no new `isinstance` arm — v2 and v3
+`WorkflowRevisionV1` values are still the same Python type (`depends_on` is just a field on the
+nested `TaskV1`), unlike the v1→v2 change which was a genuine type change (`_LegacyWorkflowRevisionV1`
+vs `WorkflowRevisionV1`). Only the pre-M7 single-`task` legacy type (v1) still needs its own fold
+branch, already present since slice 1.
+
+**Reader fork, made explicit (added after round-1 review, MEDIUM-1 — "today's v2 reader
+retained" is unimplementable as a bare statement because the v1-legacy, v2-legacy, and v3 readers
+currently share `_read_task_v1`/`_TASK_KEYS`/`_require_task_sequence`, and `depends_on` is a
+required field on `TaskV1` per S9's own fixture-migration test):** `depends_on` is a required
+constructor field on `TaskV1` (default-free, matching `task_id`/`objective`/`acceptance_criteria`
+— no silent `None`/optional shape). This means the retained v1 and v2 legacy readers cannot reuse
+`_read_task_v1` unchanged; they must construct `TaskV1(..., depends_on=())` explicitly. Concretely:
+a new `_TASK_V3_KEYS` (or `_read_task_v1` parameterized by an explicit key set/depends-on flag) is
+added for the v3 reader only; the retained v2 reader gets its own task-reading path that rejects a
+`"depends_on"` key inside any task object with `UNSUPPORTED_SCHEMA_VERSION` (mirroring
+`read_legacy_workflow_revision_v1`'s existing `"tasks"`-key check at the v1→v2 boundary, not a bare
+`_require_exact_keys` call, which would return the wrong rejection code) and otherwise constructs
+`TaskV1(..., depends_on=())`; the v1 reader is unaffected beyond the same explicit
+`depends_on=()` construction, since it never had a `depends_on` key to reject in the first place.
+This is the same fork the existing `read_legacy_workflow_revision_v1` precedent already performs
+with `_LEGACY_WORKFLOW_REVISION_KEYS`/`_LEGACY_COVERAGE_ENTRY_KEYS` — slice 2 extends the same
+pattern one level deeper (per-task key sets, not just per-revision key sets), it does not
+introduce a new one.
+
+**Reader-level structural validation (new `_validate_task_dependency_graph` helper, called from
+both the reader and the publish-time defense-in-depth check per S5 — one implementation, two call
+sites, matching AGENTS.md rule 13):**
+
+- **Unknown task reference:** every `task_id` named in any `depends_on` must appear as some
+  task's own `task_id` in the same `tasks` sequence. Reject `MALFORMED_PAYLOAD` (reader) /
+  a new `PublishRejectionCode.WORKFLOW_REVISION_UNKNOWN_DEPENDENCY` (publish defense-in-depth) —
+  naming follows the existing `WORKFLOW_REVISION_TASK_ID_DUPLICATE` precedent
+  (`publish.py:PublishRejectionCode`) for a per-revision structural defect.
+- **Self-dependency:** a task naming its own `task_id` in its own `depends_on`. Reject
+  `MALFORMED_PAYLOAD` / `WORKFLOW_REVISION_SELF_DEPENDENCY`.
+- **Duplicate edge (ambiguous dependency semantics):** the same `task_id` appearing more than
+  once in one task's `depends_on` tuple. Reject `MALFORMED_PAYLOAD` /
+  `WORKFLOW_REVISION_DUPLICATE_DEPENDENCY` — Spec 04 explicitly lists "ambiguous dependency
+  semantics" as a required-rejection case (line 17), and a duplicated edge has no meaning beyond
+  a single edge, so treating it as accepted-but-redundant would silently paper over malformed
+  input rather than failing closed.
+- **Structural cycle:** cycle detection over the directed graph `task_id → depends_on` **must use
+  an iterative algorithm (Kahn's-algorithm topological sort, failing if any node is never
+  dequeued), not recursive DFS** (added after round-1 review, LOW-1 — a hostile or generated deep
+  chain, e.g. 10⁴+ tasks or a long cycle, would raise an unhandled `RecursionError` under
+  recursive DFS instead of a typed `MALFORMED_PAYLOAD` rejection, breaking this reader's
+  fail-closed-typed contract). Run once over the full `tasks` sequence after every task's own
+  `depends_on` list has been individually validated against the three checks above. Reject
+  `MALFORMED_PAYLOAD` / `WORKFLOW_REVISION_DEPENDENCY_CYCLE`.
+- **Prerequisite (added after round-1 review, LOW-1):** each task's `depends_on` is validated as a
+  string sequence with `allow_empty=True` (reusing `_require_string_sequence`, `protocol_v1.py:
+  509–525` — *not* `acceptance_criteria`'s `allow_empty=False` call shape, which would wrongly
+  reject every dependency-free task's empty tuple) before any of the four structural checks run.
+
+All four checks are pure functions of the candidate's own `tasks` sequence — no lineage lookup,
+no I/O — matching every other reader-level validation in this file.
+
+## S5. Publish-boundary defense-in-depth
+
+`kernel/publish.py`'s `_kind_binding_rejection` `WORKFLOW_REVISION` branch (currently: duplicate
+`task_id` check, then genesis-Request binding check — `publish.py:322–335`) gains a call to the
+same `_validate_task_dependency_graph` helper (S4) immediately after the existing duplicate-
+`task_id` check and before the genesis-Request binding check, returning the same typed
+rejections. This is defense-in-depth only (a malformed candidate should already be rejected by
+the reader before `publish()` is ever called with a parsed value) — matching slice 1 §4.5's own
+stated rationale for checking duplicate `task_id` at both layers.
+
+## S6. Eligibility change (`kernel/workflow_eligibility.py`)
+
+**`WorkflowEligibility` gains a new field, additive:**
+
+```python
+@dataclass(frozen=True)
+class WorkflowEligibility:
+    status: WorkflowEligibilityStatus
+    task: TaskV1 | None = None          # unchanged: the deterministic tie-break "next action"
+    reason: str = ""
+    eligible_tasks: tuple[TaskV1, ...] = ()   # new: the full ready set, Spec-04-required
+```
+
+(field order changed after round-1 review, LOW-3 — `eligible_tasks` is appended **after**
+`reason`, not inserted before it, so any future positional-argument construction cannot silently
+bind `reason`'s string into `eligible_tasks`'s tuple slot; all three current call sites already use
+keyword arguments and are unaffected.)
+
+`task` keeps its slice-1 meaning (the single task the driver should materialize next) so slice
+1's own tests and `run_workflow`'s existing `eligibility.task` reads keep working unchanged.
+**`eligible_tasks` is every task with state kind `not_started` *or* `in_flight`** whose entire
+`depends_on` set has state kind `complete`, in **declaration order** (the same "array order is the
+deterministic tie-break rule" choice slice 1 already made for its own ordering bullet, §4.1 of the
+slice-1 plan, now doing real tie-break work for the first time since more than one task can be
+simultaneously ready). `task` is `eligible_tasks[0]` when `eligible_tasks` is non-empty and status
+is `NEXT_TASK`.
+
+**Correction after round-1 review (HIGH-1):** the draft definition above originally read "every
+**not_started** task" only, which silently dropped slice 1's in-flight-resume rule (§8 of the
+slice-1 plan, proven by `test_in_flight_task_is_eligible_for_resume`) — an `in_flight` task
+(Attempt Packet committed, no Result yet, e.g. a crash mid-chain) with satisfied dependencies must
+still be resume-eligible and still be the selected `task`, exactly as it already is under slice
+1's positional rule. Fixed in the definition above (`not_started` **or** `in_flight`) rather than
+left as a draft error; S9 gains an explicit test for both the in-flight-with-satisfied-deps case
+(eligible, selected) and the in-flight-with-unsatisfied-dep case (impossible in practice since a
+committed Attempt Packet implies its own dependencies were already satisfied when it was
+materialized, but the order-violation check below still covers it defensively for any state that
+should never occur).
+
+**Order-violation check, generalized from positional to dependency-based:** the existing check
+(lines 182–189) — "no task may be anything but `not_started` while an earlier-index task is
+incomplete" — becomes "no task may be anything but `not_started` while any task it
+`depends_on` is not `complete`." The rejection code stays `TASK_ORDER_VIOLATION` (its name
+already reads correctly for the generalized meaning — "an ordering constraint was violated,"
+whether the constraint was positional or graph-based — introducing a second, near-duplicate code
+for the same failure class would fragment the enum without adding real information for a
+caller deciding how to react). This is a deliberate reuse, called out here so a reviewer does not
+mistake it for a missed rename.
+
+**Blocking semantics — explicit scope decision, not escalated (documented per AGENTS.md rule
+10):** if **any** task's state kind is `fail` or `blocked`, the overall workflow status is
+`WORKFLOW_BLOCKED`, exactly like slice 1 — even if other, dependency-independent branches still
+have tasks that would otherwise be `eligible_tasks`. The alternative (report `NEXT_TASK` for
+still-progressable independent branches while one branch is blocked) was considered and
+rejected for this slice: it would require the driver to safely continue materializing one
+branch while another sits blocked, which is a real form of "proceeding with partial workflow
+state" that step 9 ("proven-safe parallel execution") and steps 4–6 (retry/repair/replan, which
+govern *how* a blocked branch might ever become unblocked) are the roadmap's named place for —
+introducing it here would be exactly the "build DAG scheduling... before the one-task path is
+trustworthy" mistake the roadmap's own adversarial-review Lens D warns against (line 79),
+applied one layer up: partial-branch continuation before single-branch blocking is even proven.
+Slice 2's `eligible_tasks` field still reports the true ready set (useful for tests and future
+slices to consume), but `project_workflow_eligibility`'s **status** stays `WORKFLOW_BLOCKED`
+workflow-wide the instant any task is `fail`/`blocked`, matching slice 1's existing fail-closed
+posture rather than inventing new partial-continuation semantics. If this default should be
+different, it is a plan/roadmap decision, not a "figure it out during implementation" gap — this
+slice takes the conservative default without escalating because slice 1's identical posture was
+never itself flagged as a defect by either review round, and the roadmap explicitly assigns
+per-branch continuation logic to later, named steps.
+
+## S7. Driver change (`execution/run_one_task.py`)
+
+The `run_workflow` loop's `for index in range(eligible_index + 1): materialize(index)` /
+`for index in range(blocked_index + 1): materialize(index)` patterns (lines 596–600, 607–610)
+are **positional and DAG-incompatible** — they must change regardless of what "index" would mean
+under a DAG, because eligibility no longer implies "everything at a lower index is done or must
+be run first." The fix is a simplification, not just a compatibility shim: since
+`project_workflow_eligibility` is recomputed fresh every loop iteration and already guarantees
+(via the order-violation/dependency check, S6) that a task it reports as `NEXT_TASK`/
+`eligible_tasks[0]` has every dependency already `complete`, the driver needs to materialize
+**only that one task**, not a range:
+
+```python
+while True:
+    eligibility = project_workflow_eligibility(candidate_revision, task_runs)
+    if eligibility.status is WorkflowEligibilityStatus.WORKFLOW_COMPLETE:
+        for task_id in task_ids:
+            materialize_by_task_id(task_id)
+        return RunWorkflowResult(task_results=tuple(results))
+    if eligibility.status is WorkflowEligibilityStatus.WORKFLOW_BLOCKED:
+        for task_id in task_ids:
+            if state_kind_of(task_id) != "not_started":
+                materialize_by_task_id(task_id)
+        return RunWorkflowResult(
+            task_results=tuple(results),
+            blocked_task=eligibility.task,
+            reason=eligibility.reason,
+        )
+    assert eligibility.task is not None
+    materialize_by_task_id(eligibility.task.task_id)
+```
+
+where `materialize_by_task_id` is the existing `materialize` closure (lines 566–588) with its
+`index: int` parameter changed to `task_id: str` and its `task = tasks[index]` line changed to a
+`task_id → TaskV1` lookup (a dict built once from `tasks`, mirroring the existing
+`task_ids = tuple(task.task_id for task in tasks)` line's own precedent for precomputing
+task-identity structures). `RunWorkflowResult` and its `blocked_task`/`workflow_complete`
+properties are unchanged (S8 confirms no result-shape change). This also fixes a latent
+inefficiency in slice 1's own code, noted here rather than silently carried forward: slice 1's
+range-based materialize already redundantly re-materializes already-complete earlier tasks every
+iteration (a cheap no-op via `materialized.get(task.task_id)`, but still a wasted loop) — the
+single-task materialize removes that waste as a side effect of the DAG fix, not as a separate
+unscoped optimization.
+
+**Correction after round-1 review (HIGH-2):** the original sketch returned immediately on
+`WORKFLOW_COMPLETE`/`WORKFLOW_BLOCKED` without materializing anything, which breaks the exact
+idempotent-re-invocation and crash-resume guarantees S9/S12 require and slice 1 already
+established (§9, §14.3): `results`/`materialized` are process-local and start empty on every
+fresh `run_workflow` call, so a re-invocation against an already-completed or already-blocked
+workflow must still re-materialize every task with committed lineage to reconstruct
+`task_results` — this is a safe idempotent no-op via each materialize call's existing
+`materialized.get(task_id)` short-circuit, not a re-execution. The reviewer's finding that the
+complete-branch loop is *not* actually DAG-incompatible (materializing every already-complete task
+in any order is a safe recovery no-op regardless of array position) is correct and is why the
+complete/blocked branches above loop over `task_ids` directly rather than through
+`eligible_tasks` — only the `NEXT_TASK` branch needed the DAG-aware single-task rewrite; the
+recovery branches only needed their index-range replaced with a task_id-keyed iteration. On
+`WORKFLOW_BLOCKED`, every task whose state kind is not `not_started` (i.e. `in_flight`,
+`complete`, `fail`, or `blocked` — anything with committed lineage) is materialized, including the
+blocked task's own chain; a genuinely `not_started` independent branch is never touched, matching
+S6's blocking-scope decision (blocked status is workflow-wide, but materialization still only
+touches tasks that actually ran). `state_kind_of` is the same per-task state-kind classification
+`project_workflow_eligibility` already computes internally (`_state_kind`), threaded through or
+recomputed identically — not a new concept.
+
+## S8. What slice 2 deliberately does not change
+
+- `kernel/lineage_store.py`, `kernel/publish.py`'s `_NEXT_KIND`/`_committed_contract` — unchanged
+  (Option A, slice 1 §3, still holds: DAG dependency validation is purely a Workflow-Revision-
+  shape and eligibility-projection concern, not a per-run cardinality concern).
+- `AttemptPacketV1`, `ResultV1`, `VerificationV1`, `ReceiptV1`, `execution/policy.py`,
+  `verification/stub_verifier*.py` — completely unchanged, same as slice 1 §5.
+  **Correction after implementation blocker (round 1 dispatch, BLOCKER
+  `PLAN_CONTRADICTION_FROZEN_VERIFIER_TASK_SHAPE` — resolved in-plan, no real tradeoff, same
+  precedent as slice 1 §4.4):** the bullet above is over-broad by exactly one file.
+  `execution/run_one_task.py:218` sends `task.to_canonical_value()` to the verifier subprocess,
+  and `verification/stub_verifier_cli.py::_read_task` (lines 33–47) requires the task key set to
+  be exactly `{task_id, objective, acceptance_criteria}` — so S4's canonical-payload change
+  breaks every real verification (`task_keys_mismatch`) while S9 still demands the real-binary
+  end-to-end DAG driver. Resolution: `stub_verifier_cli.py`'s `_read_task` gains a **mechanical
+  wire-shape update only** — accept `depends_on` as a key (required in the payload it receives,
+  validated as an `allow_empty=True` string sequence), pass it into the `TaskV1` constructor —
+  and `product/tests/verification/test_stub_verifier_cli.py` gains the matching fixture update.
+  Verifier semantics (coverage/verdict/execution-identity logic, `stub_verifier.py` itself) are
+  unchanged; `stub_verifier.py` consumes a `TaskV1` object in-process and needs no change. This
+  file is hereby added to the touch allowlist for that single function's key-set/constructor
+  update and nothing else.
+- `workflow_record_idempotency_key`/`workflow_task_sequence_digest`
+  (`execution/run_one_task.py:115–136`) — unchanged in *code shape*; they already digest
+  `task.to_canonical_value()` for every task in the sequence, so a `depends_on` field
+  automatically participates in the existing digest without any code change (verified by S9's
+  digest-regeneration test, not assumed). **This is not idempotency-neutral — see the explicit
+  decision below (HIGH-3, added after round-1 review).**
+- **Idempotency-key orphaning across the v2→v3 upgrade — decided explicitly, not left implicit
+  (HIGH-3, round-1 review):** adding `"depends_on": []` to `TaskV1.to_canonical_value()` changes
+  `workflow_task_sequence_digest` for every task, *including* pre-slice-2 tasks with no
+  dependencies, because the digested value now has an extra key that wasn't there before. Every
+  committed slice-1-era workflow's per-record idempotency keys were derived from the old digest.
+  Post-upgrade, re-invoking `run_workflow` on a slice-1-era workflow (completed, blocked, or
+  in-flight) derives new keys that miss the startup idempotency lookup
+  (`run_one_task.py:551–561`), so eligibility sees the whole workflow as fresh `not_started` and
+  the driver publishes a new genesis Request and re-executes the entire workflow in new runs. No
+  record is corrupted — every new run is internally correct and fail-closed — but this **is** a
+  real behavior change for pre-upgrade history, and this plan accepts it explicitly rather than
+  silently: it is the v2→v3 analogue of pre-M7 single-task runs already being non-resumable
+  through `run_workflow`, and the per-task binding digests that actually gate re-execution safety
+  (`attempt.py:96–98`, `host.py:311–312`) are unaffected — both sides recompute post-upgrade and
+  agree, so no unsafe reuse or corruption is possible, only a fresh run-set instead of a resumed
+  one. S9 gains an explicit test asserting this documented behavior (re-invoking a v2-era
+  completed/blocked workflow under v3 code starts a fresh run-set, no reuse, no crash) so the
+  consequence is proven, not assumed.
+- `RunWorkflowResult`'s public shape (`execution/run_one_task.py:94–112`) — unchanged; S7's
+  driver-loop rewrite is an internal implementation change only. **Observable ordering of
+  `task_results` does change** (added after round-1 review, LOW-2): under slice 1's linear
+  execution, `results` append order equals `tasks` array order; under a DAG, materialization order
+  is eligibility-driven declaration order among ready tasks, so `task_results` can legitimately
+  differ from `tasks` array order (e.g. the task at array index 2 completing before index 1). This
+  is a real, if minor, observable change to a public result type and is named here rather than
+  left for a caller to discover. Similarly, the per-task `expected_output_digests[index]` lookup
+  (slice 1 §14.4's fix) moves to the same `task_id → TaskV1` map S7 already builds, alongside the
+  materialize lookup — not a separate change.
+- `kernel/replay.py`'s fold structure — unchanged (S4: no new Python type, only a new schema
+  version + new/legacy reader pair, exactly like a same-type field addition would be for any
+  other contract).
+- Resource claims, retry/repair/replan, fan-in merge policy, reconciliation, parallel execution —
+  none of these gain any contract field or code path this slice (S1, S3's fan-in note).
+
+## S9. Test plan
+
+### Protocol/reader (`product/tests/contracts/test_protocol_v1_m7_slice2.py`, new)
+
+- `TaskV1.depends_on` round-trips through `to_canonical_value()`/the v3 reader for a valid DAG
+  (e.g. `A → []`, `B → []`, `C → [A, B]`)
+- schema-version dispatch: a `schema_version=3` candidate with `depends_on` fields parses; a
+  `schema_version=2` candidate whose task objects carry a `depends_on` key is rejected
+  `UNSUPPORTED_SCHEMA_VERSION` by the (now-legacy) v2 reader; a `schema_version=2` candidate
+  without `depends_on` still parses through the v2 reader unchanged (regression: slice 1's own
+  shape must remain valid, un-migrated)
+- unknown dependency reference rejected `MALFORMED_PAYLOAD`
+- self-dependency rejected `MALFORMED_PAYLOAD`
+- duplicate edge within one task's `depends_on` rejected `MALFORMED_PAYLOAD`
+- two-node cycle (`A → [B]`, `B → [A]`) and three-node cycle (`A → [B]`, `B → [C]`, `C → [A]`)
+  both rejected `MALFORMED_PAYLOAD`
+- golden-digest fixtures regenerated for the v3 wire shape (following slice 1's own precedent,
+  §9 of the slice-1 plan)
+- replay regression: a v2-schema-committed `WorkflowRevisionV1` (no `depends_on`) still replays
+  and folds correctly through the unchanged fold structure (S4)
+
+### Publish boundary (`product/tests/kernel/test_publish_m7_slice2.py`, new)
+
+- valid DAG publishes at the unchanged `WORKFLOW_REVISION` successor position (no `_NEXT_KIND`
+  change)
+- each of the four structural rejections (unknown reference, self-dependency, duplicate edge,
+  cycle) also rejected at the publish boundary via the shared `_validate_task_dependency_graph`
+  helper (S5) — proving the defense-in-depth call site actually fires, not just the reader
+
+### Eligibility (`product/tests/kernel/test_workflow_eligibility_dag.py`, new)
+
+- diamond DAG (`A → []`, `B → [A]`, `C → [A]`, `D → [B, C]`): only `A` eligible while nothing has
+  run; after `A` completes, `eligible_tasks == (B, C)` in declaration order, `task == B` (tie-break);
+  after `B` and `C` both complete, only `D` eligible; after `D` completes, `WORKFLOW_COMPLETE`
+- `B` completing before `A` (an out-of-order committed lineage, the DAG analogue of slice 1's
+  HIGH-2-era `TASK_ORDER_VIOLATION` case) — fails closed with `TASK_ORDER_VIOLATION`, not
+  silently accepted
+- `A` fails (`FAIL`/`BLOCKED` verdict): `WORKFLOW_BLOCKED` workflow-wide even though an unrelated
+  independent task with no dependency on `A` would otherwise be `eligible_tasks`-ready (S6's
+  documented scope decision — proves the decision is actually implemented, not just described)
+- same fixture run twice → identical `eligible_tasks`, identical `task`, identical status
+  (determinism, Spec 04's core requirement, same test shape as slice 1 §9's own determinism test)
+- cross-run digest-agreement check (`_validate_revision_copies`, unchanged) still fires correctly
+  when `TaskV1.depends_on` is part of what's compared — two per-task runs whose committed
+  `tasks` sequences differ only in one task's `depends_on` value must be caught as
+  `WORKFLOW_REVISION_DIGEST_DIVERGENCE`, proving the unchanged digest function actually covers
+  the new field rather than assuming it does
+- **(added after round-1 review, HIGH-1)** in-flight resume under a DAG: a diamond DAG with `A`
+  complete and `B` `in_flight` (Attempt Packet committed, no Result) and satisfied deps reports
+  `B` in `eligible_tasks` and as `task` (resume-eligible, not dropped from the ready set) —
+  the DAG-generalized analogue of slice 1's `test_in_flight_task_is_eligible_for_resume`
+
+### Driver (`product/tests/execution/test_run_workflow_dag.py`, new)
+
+- the same diamond DAG executed end-to-end through the real fixture OpenCode binary (same
+  pattern as slice 1's `test_run_workflow.py`): all four tasks reach terminal `PASS` Receipts in
+  a dependency-respecting order (`A` before `B`/`C`, both before `D`), `run_workflow` reports
+  workflow-complete
+- `A` fails verification: `run_workflow` stops, `B`/`C`/`D` never get Attempt Packets published
+  (the DAG analogue of slice 1's linear negative test)
+- crash-resume across a DAG: `A` and `B` complete, `C`'s Attempt Packet is published but the
+  process is interrupted before `C`'s Result; re-invoking `run_workflow` resumes `C` (not `D`,
+  which still cannot start) rather than restarting `C` or misreporting the workflow as blocked
+- idempotent re-invocation of a fully-completed DAG workflow returns existing per-task
+  publications, no duplicate runs (same idempotency mechanism as slice 1, unchanged — this test
+  exists to prove the DAG driver loop rewrite, S7, didn't accidentally break it)
+- crash-resume/blocked re-invocation actually returns a populated `task_results` (added after
+  round-1 review, HIGH-2): re-invoke `run_workflow` against an already-`WORKFLOW_COMPLETE`
+  diamond DAG and assert `task_results` contains all four tasks' Results, not an empty tuple;
+  re-invoke against an already-`WORKFLOW_BLOCKED` DAG (one branch failed, one independent branch
+  still `not_started`) and assert `task_results` contains every task with committed lineage
+  (including the blocked task's own chain) but not the untouched `not_started` branch
+- **(added after round-1 review, HIGH-3)** v2→v3 idempotency-key orphaning is real and
+  documented, not silently absorbed: commit a slice-1-shaped (schema-v2, `depends_on`-free)
+  workflow to completion, then re-invoke `run_workflow` against the same Request under v3 code —
+  assert a fresh run-set is created (new genesis Request, new per-task runs) rather than a crash
+  or a corrupted/mismatched idempotency hit, matching S8's explicit HIGH-3 decision
+
+### Regression
+
+- every slice-1 fixture that constructs a `WorkflowRevisionV1`/`TaskV1` directly
+  (`test_publish_m7.py`, `test_workflow_eligibility.py`, `test_run_workflow.py`, and the five
+  files slice 1's own MEDIUM-1 fix already updated) continues to pass, since
+  `depends_on` is optional-shaped at the type level only in the sense that an empty tuple is a
+  valid value, not in the sense of an `Optional`/default-`None` field that could silently vanish
+  — every fixture must be checked to confirm it either already passes `depends_on=()` or is
+  updated to do so; a fixture that fails to compile against the new required positional/keyword
+  field is exactly the kind of "found the missing site by running the suite, not by claiming it's
+  unchanged" verification slice 1's own MEDIUM-1 finding was about
+
+- **Correction found during implementation dispatch, attempt 1 (a real plan contradiction, caught
+  by the implementer before writing any code, not guessed around):** blanket `depends_on=()` is
+  *not* correct for every existing fixture — it is correct only for fixtures that don't test
+  ordering. `test_workflow_eligibility.py`'s `test_later_in_flight_task_before_earlier_task_fails_closed`
+  and `test_later_complete_task_before_earlier_task_fails_closed` specifically assert
+  `TASK_ORDER_VIOLATION` when `task-2` has lineage but `task-1` (declared first, array position)
+  does not. Under S6's pure dependency-based ordering, two dependency-free tasks
+  (`depends_on=()` on both) have no ordering relationship at all — `task-2` running before
+  `task-1` is not a violation, it's a legitimate independent-branch execution order, exactly the
+  behavior a DAG is supposed to allow. Migrating these two tests to `depends_on=()` would silently
+  change what they test (from "order violation" to "no violation," making the `assertRaises`
+  block simply never raise, which would surface as a test failure, not a silent pass — this was
+  caught before any code was written, not after). **Resolution: these two tests specifically
+  express a genuine linear dependency, not the absence of one** — update their fixtures to declare
+  `task-2.depends_on = ("task-1",)` via the existing `revision(tasks=...)` helper's override
+  parameter (`test_workflow_eligibility.py:28`), preserving each test's actual intent (a real
+  declared dependency violated by out-of-order lineage) under the new semantics. This is not
+  "preserve implicit positional ordering as a fallback" (the implementer's proposed alternative
+  2) — that would reintroduce exactly the two-systems-at-once confusion S6 exists to remove, and
+  would wrongly force every pair of truly-independent dependency-free tasks back into forced
+  array-order execution, defeating the DAG's purpose. Every *other* existing fixture in this
+  suite and in `test_publish_m7.py`/`test_run_workflow.py` that does not assert an
+  order-violation outcome takes blanket `depends_on=()` as originally specified — only fixtures
+  whose assertion depends on an ordering relationship need an explicit edge instead.
+
+## S10. Implementation order
+
+1. `kernel/protocol_v1.py`: `TaskV1.depends_on: tuple[str, ...]` field (required, no default —
+   MEDIUM-1); `WORKFLOW_REVISION_SCHEMA_VERSION` bumped 2 → 3; new v3-only task reader/key set
+   (`_TASK_V3_KEYS` or an equivalent explicit fork of `_read_task_v1`, MEDIUM-1) with
+   `depends_on` support; today's v2 reader forked to its own task-reading path that rejects a
+   `depends_on` key with `UNSUPPORTED_SCHEMA_VERSION` and otherwise constructs
+   `TaskV1(..., depends_on=())`, retained at `(WORKFLOW_REVISION, 1, 2)`; the v1 legacy reader
+   also updated to construct `TaskV1(..., depends_on=())` explicitly; new
+   `_validate_task_dependency_graph` helper — `depends_on` validated as an `allow_empty=True`
+   string sequence first (LOW-1), then unknown reference / self-dependency / duplicate edge
+   checks, then an **iterative** (Kahn's-algorithm, not recursive DFS — LOW-1) cycle check — called
+   from the v3 reader.
+2. `kernel/publish.py`: `_kind_binding_rejection`'s `WORKFLOW_REVISION` branch calls the same
+   `_validate_task_dependency_graph` helper; four new `PublishRejectionCode` members
+   (`WORKFLOW_REVISION_UNKNOWN_DEPENDENCY`, `WORKFLOW_REVISION_SELF_DEPENDENCY`,
+   `WORKFLOW_REVISION_DUPLICATE_DEPENDENCY`, `WORKFLOW_REVISION_DEPENDENCY_CYCLE`).
+2b. `verification/stub_verifier_cli.py`: `_read_task` mechanical wire-shape update only (S8
+   correction) — key set gains `depends_on`, validated as an `allow_empty=True` string sequence,
+   forwarded into the `TaskV1` constructor; `product/tests/verification/test_stub_verifier_cli.py`
+   fixture updated to send `depends_on`. No other change to that file or to `stub_verifier.py`.
+3. `kernel/workflow_eligibility.py`: `WorkflowEligibility.eligible_tasks` field added *after*
+   `reason` (LOW-3); order-violation check generalized from positional to `depends_on`-based;
+   ready-set computation returns every task with state kind `not_started` **or** `in_flight`
+   whose deps are all `complete` (HIGH-1 — not `not_started`-only), in declaration order; `task`
+   set to `eligible_tasks[0]`; blocking semantics unchanged in shape (workflow-wide
+   `WORKFLOW_BLOCKED` on any `fail`/`blocked` task kind, S6).
+4. `execution/run_one_task.py`: `run_workflow`'s `NEXT_TASK` branch rewritten to materialize the
+   single eligible task by `task_id` (S7); the `WORKFLOW_COMPLETE` and `WORKFLOW_BLOCKED` branches
+   keep materializing every task with committed lineage (not `not_started`) before returning,
+   switched from index-range to task_id-keyed iteration rather than dropped (HIGH-2); `materialize`
+   closure's `index: int` parameter changed to `task_id: str` with a precomputed
+   `task_id → TaskV1` lookup, reused for the `expected_output_digests` lookup too (LOW-2).
+5. Golden-digest fixtures regenerated for the v3 `WorkflowRevisionV1`/`TaskV1` wire shape.
+6. Test suite (S9): protocol-reader extensions, publish-boundary structural rejections,
+   DAG eligibility tests (diamond fixture, order-violation, blocking-scope-decision proof,
+   determinism, digest-divergence-with-`depends_on`), DAG driver tests (end-to-end,
+   negative/blocked, crash-resume, idempotent re-invocation), and the full slice-1 regression
+   list confirmed still green with `depends_on=()` on every existing fixture.
+
+## S11. Explicit scope limits carried forward
+
+Per AGENTS.md rule 9 (YAGNI) and this document's own precedent (§11 of the slice-1 plan) — the
+roadmap's own nine-step order, restated as what remains after slice 2:
+
+- **Step 3 — logical Resource Claims with read/write conflict semantics.** No resource-claim
+  contract field exists; nothing in slice 2 needs it since dependency-respecting execution stays
+  strictly sequential (S1, S7).
+- **Steps 4–6 — bounded retry, repair, replan.** A `fail`/`blocked` task still blocks the whole
+  workflow workfow-wide (S6); nothing retries it automatically, and no partial-branch-continuation
+  logic exists for independent branches while one is blocked (S6's explicit scope decision).
+- **Step 7 — fan-in with explicit merge/conflict policy.** Converging dependency edges (a task
+  depending on more than one predecessor) are structurally supported (S3), but no merge-strategy/
+  conflict-behavior/merge-authority field exists — each downstream task still runs its own
+  independent Attempt/Result/Verification chain, nothing is combined.
+- **Step 8 — reconciliation-required handling.** No `reconciliation_required` state exists; not
+  reachable from any slice-2 code path.
+- **Step 9 — proven-safe parallel execution.** The driver (S7) still materializes exactly one
+  task per loop iteration, sequentially, even when `eligible_tasks` reports more than one ready
+  task; no concurrency is introduced.
+- **ADR-0009 Reviewer/Verifier split** (unchanged from slice 1 §6): still blocked on risk-tier/
+  Plan-Check machinery that does not exist anywhere in `product/src/` (S2 re-confirms the same
+  empty grep result against current HEAD).
+- **M3's per-task capability-requirement gap** (unchanged from slice 1 §7): `TaskV1` gains only
+  `depends_on` this slice, no capability/permission field.
+- **Spec 04's `workflow/risk profile and admitted policy` field and Plan-Check requirement
+  predicate** (unchanged from slice 1 §11's MEDIUM-3 deviation record): still not implemented;
+  DAG dependency validation is orthogonal to risk-tier/policy admission and does not close this
+  gap.
+
+## S12. Slice 2 exit gate
+
+- an admitted Workflow Revision may declare explicit dependency edges between tasks, not just
+  array position (S3, S4)
+- admission rejects unknown task references, self-dependencies, structural cycles, and duplicate
+  edges for the same task (S4, S5, S9)
+- the same admitted revision + per-task-run lineage always yields an identical eligible task set,
+  identical declared-order tie-break, and identical next action (S6, S9 — determinism test, run
+  twice, per Spec 04's own wording)
+- a task with an unsatisfied dependency is never reported eligible, whether the unsatisfied
+  dependency is `not_started`, `in_flight`, or terminally `fail`/`blocked` (S6, S9)
+- a `fail`/`blocked` task blocks the whole workflow, including branches with no dependency on the
+  failed task (S6's explicit, non-escalated scope decision, proven by a dedicated test in S9)
+- pre-slice-2 (`depends_on`-free) `WorkflowRevisionV1` history remains replayable through the
+  legacy-reader-retention pattern, with its folded value preserved (S4, S9)
+- crash-resume and idempotent re-invocation work identically to slice 1 for a genuinely
+  branching (non-linear) DAG, not only for the strictly linear case (S9)
+
+## S13. Round 1 adversarial review (`zai-coding-plan/glm-5.3`, effort `high`, via `opencode`,
+`--auto`, against this plan's S1–S12 draft and real code at `main` `df89f48`)
+
+Full findings preserved verbatim at `.review/ISSUE-4-SLICE2-PLAN-REVIEW.md`. **0 BLOCKER, 3 HIGH,
+3 MEDIUM, 3 LOW** — no step 3–9 scope creep found (explicitly verified non-finding), plan's
+overall scope discipline held. All 9 real findings folded directly into S1–S10 above (not just
+logged here), same discipline as slice 1's §13/§14:
+
+- **HIGH-1** — S6's original `eligible_tasks` definition ("every `not_started` task…") silently
+  dropped slice 1's in-flight-resume rule, contradicting a live green test
+  (`test_in_flight_task_is_eligible_for_resume`) and this plan's own S9 crash-resume test. Fixed
+  in S6/S9/S10: `eligible_tasks` includes `in_flight` tasks with satisfied deps.
+- **HIGH-2** — S7's driver sketch returned immediately on `WORKFLOW_COMPLETE`/`WORKFLOW_BLOCKED`
+  without materializing anything, so a re-invoked completed/blocked DAG would return an empty
+  `task_results` — contradicting S12's own idempotent-re-invocation exit criterion. Fixed in
+  S7/S9/S10: both recovery branches keep materializing every task with committed lineage,
+  switched to task_id-keyed iteration rather than dropped.
+- **HIGH-3** — S4's digest change silently orphans every slice-1-era workflow's idempotency keys
+  across the v2→v3 upgrade (identical logical content digests differently once `depends_on: []`
+  is added), which the plan neither stated nor tested. Decided explicitly in S8 (accept and
+  document — same class as pre-M7 single-task non-resumability, no corruption, only a fresh
+  run-set on re-invocation) and proven by a new S9 test, rather than left implicit.
+- **MEDIUM-1** — "today's v2 reader retained" was unimplementable as stated: the v1/v2/v3 readers
+  share `_read_task_v1`/`_TASK_KEYS`, and `depends_on` is a required field per S9's own fixture
+  test, so the legacy readers cannot be reused unchanged. Fixed in S4/S10: explicit reader fork
+  (v3-only key set; v2/v1 readers construct `depends_on=()` explicitly and the v2 reader rejects a
+  present `depends_on` key), matching `read_legacy_workflow_revision_v1`'s existing per-revision
+  key-fork precedent one level deeper.
+- **MEDIUM-2** — three Spec 04 normative readings (tie-break metadata, per-edge satisfaction
+  condition, "incompatible graph references") were resolved by implicit design choice rather than
+  named, breaking slice 1 §11 MEDIUM 3's own named-deviation discipline. Fixed in S3: three
+  deviations named explicitly with rationale.
+- **MEDIUM-3** — S1/S2/S6 contained eight inaccurate file:line citations (Spec 04 line numbers,
+  `publish.py`'s branch range, `run_one_task.py`'s end line, `workflow_eligibility.py`'s line
+  count) and one wrong-authority attribution (cited "Lens A" for an argument actually made by
+  "Lens D"). All eight corrected in place; substance of every citation was otherwise verified
+  accurate.
+- **LOW-1** — the cycle-detection sketch (recursive DFS) would raise an unhandled `RecursionError`
+  on a hostile deep chain instead of a typed rejection, and `depends_on` validation never stated
+  `allow_empty=True` (reusing `acceptance_criteria`'s `allow_empty=False` shape would reject every
+  dependency-free task). Fixed in S4/S10: iterative (Kahn's-algorithm) cycle detection mandated;
+  `allow_empty=True` stated explicitly.
+- **LOW-2** — two observable API changes under a DAG went unremarked: `task_results` ordering can
+  differ from array order, and the `expected_output_digests[index]` lookup needs the same
+  task_id-keying S7 already introduces. Fixed in S8/S10 with one sentence each.
+- **LOW-3** — the `WorkflowEligibility` snippet inserted `eligible_tasks` before `reason`,
+  silently redefining the third positional argument (harmless today — all call sites use keyword
+  arguments — but a latent trap for future positional construction). Fixed in S6:
+  `eligible_tasks` appended after `reason`.
+
+Verified non-findings, not re-litigated: S5's publish-boundary insertion point preserves existing
+rejection ordering for every current test; no step 3–9 scope creep; declaration-order tie-break is
+deterministic and sufficient; S6's workflow-wide blocking decision is properly decided in-plan,
+not a dodge; slice-1 round-2 fixes (task-identity trust, out-of-order rejection) generalize
+cleanly to the DAG case.
+
+## Implementation outcome note — blocked before S10 (2026-08-28)
+
+Implementation did not start because S4/S8/S9 contained a genuine internal contradiction at the
+existing verifier seam. S4 requires a default-free `TaskV1.depends_on` field and requires it in the
+canonical task payload; S8 (as drafted) forbade changes to `verification/stub_verifier*.py`; S9
+requires the real-binary end-to-end DAG driver. The frozen `stub_verifier_cli.py` accepted only
+the pre-Slice-2 task keys and constructed `TaskV1` without `depends_on`, while `run_one_task.py`
+sends the canonical task payload to that CLI. The blocker was recorded as `.review/ISSUE-4-BLOCKER.json` with reason code `PLAN_CONTRADICTION_FROZEN_VERIFIER_TASK_SHAPE` (a transient orchestration artifact, not committed); no product code
+or tests were changed, and no commit was made.
+
+**Resolution (same session, conductor decision — no real tradeoff):** the S8 correction above
+adds `stub_verifier_cli.py::_read_task` (plus its test file) to the touch allowlist for a
+mechanical wire-shape update only (accept + validate + forward `depends_on`); verifier semantics
+unchanged. Redispatch authorized.
+
+## S14. Round 2 post-implementation review (`zai-coding-plan/glm-5.3`, effort `high`, via
+`opencode`, against `git diff df89f48..456b851`)
+
+Full findings preserved at `.review/ISSUE-4-IMPL-REVIEW.md`. **0 BLOCKER, 0 HIGH, 0 MEDIUM,
+4 LOW** — every S12 exit gate, determinism requirement, legacy-retention path, and the S8
+correction's exact scope verified as non-findings with file:line evidence. Fix directives for the
+four LOWs, folded in before the fix dispatch:
+
+- **LOW-1** — publish.py:336–361 translates the shared graph validator's rejection by parsing
+  `rejection.reason.split("=", 1)[0]` against a 4-entry map; the helper can also emit its
+  duplicate-task-id branch (currently dead at both call sites) and `_require_string_sequence`
+  failures (reachable via a hand-built `ParsedCandidate` with a non-string tuple member), and an
+  unmapped reason crashes with `RuntimeError` instead of a typed `Rejected`. Fix: stop parsing
+  the human-readable reason — give `_validate_task_dependency_graph` a structured failure
+  discriminator (dedicated exception attribute or per-check enum) the publish layer switches on;
+  map every failure mode the helper can emit to a typed `PublishRejectionCode` (the duplicate
+  branch may map to the existing `WORKFLOW_REVISION_TASK_ID_DUPLICATE`; non-string
+  `depends_on` members map to `MALFORMED_PAYLOAD`-equivalent typed rejection).
+- **LOW-2** — `project_workflow_eligibility` raises raw `KeyError` when a directly-passed
+  revision's `depends_on` names a nonexistent task_id (workflow_eligibility.py:186,199), while
+  every other malformed input there is a typed `WorkflowEligibilityRejected`. Fix: validate at
+  projection entry that every `depends_on` entry is in `task_ids`; raise
+  `WorkflowEligibilityRejected(UNKNOWN_TASK_ID, ...)` otherwise.
+- **LOW-3** — no negative test pins that `stub_verifier_cli` now *requires* `depends_on` (the
+  old 3-key payload must fail `task_keys_mismatch`). Fix: one test in
+  `product/tests/verification/test_stub_verifier_cli.py` sending a task payload without
+  `depends_on` and asserting the nonzero exit / `task_keys_mismatch` diagnostic.
+- **LOW-4** — the plan section itself was uncommitted and referenced
+  `.review/ISSUE-4-BLOCKER.json`, which no checkout contains (the blocker lived only in the
+  transient worktree `.review/`). Fix (conductor-owned, close-out): commit the plan-doc update
+  with the handoff commit and reword the outcome note to describe the blocker rather than cite a
+  missing artifact path.
+
+### Fix-verification recheck (clean context, same reviewer model)
+
+`zai-coding-plan/glm-5.3` high re-reviewed `git diff 456b851..ad3ac1a` in a clean session
+(`.review/ISSUE-4-FIX-RECHECK.md`): verdict **CLEAN** — all three directives implemented as
+specified; full escape-hatch audit of `_validate_task_dependency_graph`'s raise sites confirms
+no plain `ProtocolRejected` can bypass publish's typed switch (all `_require_string_sequence`
+raise sites wrapped); all three new tests discriminating (each fails on the pre-fix commit);
+scope exactly the three LOWs; 426 tests green (162/143/113/8).
