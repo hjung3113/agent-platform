@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ from unittest.mock import patch
 
 from execution import run_one_task as driver_module
 from execution.run_one_task import (
+    run_one_task,
     run_workflow,
     workflow_record_idempotency_key,
     workflow_task_sequence_digest,
@@ -22,7 +24,11 @@ from kernel.protocol_v1 import (
     TaskV1,
     VerificationV1,
 )
-from kernel.replay import replay
+from kernel.replay import RunState, replay
+from kernel.workflow_eligibility import (
+    WorkflowEligibilityRejectionCode,
+    WorkflowEligibilityRejected,
+)
 
 
 FIXTURE_BINARY = (
@@ -89,20 +95,21 @@ class RunWorkflowTests(unittest.TestCase):
         self,
         *,
         tasks: tuple[TaskV1, ...] = TASKS,
-        expected_output_digest: str | None = None,
+        request: RequestV1 = REQUEST,
+        expected_output_digests: tuple[str, ...] | None = None,
     ):
         return run_workflow(
             tasks,
             self.state,
-            REQUEST,
+            request,
             self.workspace_root,
             str(FIXTURE_BINARY),
             implementer_identity="implementer-m7",
             verifier_identity="verifier-m7",
-            expected_output_digest=(
-                self.expected_output_digest
-                if expected_output_digest is None
-                else expected_output_digest
+            expected_output_digests=(
+                (self.expected_output_digest,) * len(tasks)
+                if expected_output_digests is None
+                else expected_output_digests
             ),
         )
 
@@ -122,6 +129,7 @@ class RunWorkflowTests(unittest.TestCase):
         workflow_digest = workflow_task_sequence_digest(TASKS)
         expected = content_digest(
             {
+                "request_identity": content_digest(REQUEST.to_canonical_value()),
                 "workflow_revision_digest": workflow_digest,
                 "task_id": "task-m7-1",
                 "record": "request",
@@ -129,16 +137,17 @@ class RunWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            workflow_record_idempotency_key(TASKS, "task-m7-1", "request"),
+            workflow_record_idempotency_key(REQUEST, TASKS, "task-m7-1", "request"),
             expected,
         )
         self.assertNotEqual(
-            workflow_record_idempotency_key(TASKS, "task-m7-1", "request"),
-            workflow_record_idempotency_key(TASKS, "task-m7-2", "request"),
+            workflow_record_idempotency_key(REQUEST, TASKS, "task-m7-1", "request"),
+            workflow_record_idempotency_key(REQUEST, TASKS, "task-m7-2", "request"),
         )
 
     def test_fail_stops_before_publishing_next_task_attempt(self) -> None:
-        result = self.run_driver(expected_output_digest=content_digest({"wrong": True}))
+        wrong_digest = content_digest({"wrong": True})
+        result = self.run_driver(expected_output_digests=(wrong_digest, wrong_digest))
 
         self.assertTrue(result.workflow_blocked)
         self.assertEqual(result.blocked_task_id, "task-m7-1")
@@ -235,6 +244,151 @@ class RunWorkflowTests(unittest.TestCase):
         self.assertEqual(
             tuple(replay(self.state, item.run_id).last_sequence for item in resumed.task_results),
             (6, 6),
+        )
+
+    def test_two_mutating_tasks_use_distinct_expected_output_digests(self) -> None:
+        directive = self.workspace_root / "fake-opencode-directive.txt"
+        directive.unlink()
+        marker = self.workspace_root / "workflow-mutation.txt"
+
+        marker.write_text("task-m7-1\n", encoding="utf-8")
+        first_digest = snapshot_identity(self.workspace_root, ()).digest
+        marker.write_text("task-m7-1\ntask-m7-2\n", encoding="utf-8")
+        second_digest = snapshot_identity(self.workspace_root, ()).digest
+        marker.unlink()
+
+        original_execute = driver_module.host.execute
+
+        def execute_and_mark(*args, **kwargs):
+            result = original_execute(*args, **kwargs)
+            task = args[4]
+            marker.write_text(
+                marker.read_text(encoding="utf-8") + f"{task.task_id}\n"
+                if marker.exists()
+                else f"{task.task_id}\n",
+                encoding="utf-8",
+            )
+            report = self.workspace_root / "fake-opencode-report.json"
+            if report.exists():
+                report.unlink()
+            output_digest = snapshot_identity(self.workspace_root, ()).digest
+            return replace(
+                result,
+                output_snapshot_digest=output_digest,
+                observation=replace(
+                    result.observation, output_snapshot_digest=output_digest
+                ),
+            )
+
+        with patch.object(
+            driver_module.host, "execute", side_effect=execute_and_mark
+        ):
+            result = self.run_driver(
+                expected_output_digests=(first_digest, second_digest)
+            )
+
+        self.assertTrue(result.workflow_complete)
+        self.assertEqual(len(result.task_results), 2)
+        self.assertNotEqual(first_digest, second_digest)
+        self.assertEqual(
+            tuple(
+                item.result_value.output_snapshot_digest
+                for item in result.task_results
+            ),
+            (first_digest, second_digest),
+        )
+
+    def test_order_violation_in_replayed_states_fails_closed(self) -> None:
+        completed = self.run_driver()
+        task_one_run_id = completed.task_results[0].run_id
+        task_two_run_id = completed.task_results[1].run_id
+        original_replay = driver_module.replay
+
+        def replay_with_task_one_missing(state: str, run_id: str):
+            if run_id == task_one_run_id:
+                return RunState(
+                    request=None,
+                    workflow_revision=None,
+                    last_sequence=0,
+                    last_record_id=None,
+                )
+            self.assertEqual(run_id, task_two_run_id)
+            return original_replay(state, run_id)
+
+        with patch.object(
+            driver_module, "replay", side_effect=replay_with_task_one_missing
+        ):
+            with self.assertRaises(WorkflowEligibilityRejected) as raised:
+                self.run_driver()
+
+        self.assertEqual(
+            raised.exception.code,
+            WorkflowEligibilityRejectionCode.TASK_ORDER_VIOLATION,
+        )
+
+    def test_result_commit_resume_reuses_attempt_after_workspace_mutation(self) -> None:
+        with patch.object(
+            driver_module,
+            "_run_verifier_subprocess",
+            side_effect=RuntimeError("crash after result publication"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "crash after result"):
+                self.run_driver()
+
+        run_directories = [
+            entry for entry in (Path(self.state) / "runs").iterdir() if entry.is_dir()
+        ]
+        self.assertEqual(len(run_directories), 1)
+        run_id = run_directories[0].name
+        before_resume = replay(self.state, run_id)
+        self.assertIsNotNone(before_resume.attempt_packet)
+        self.assertIsNotNone(before_resume.result)
+
+        (self.workspace_root / "after-result-crash.txt").write_text(
+            "side effect completed before crash\n", encoding="utf-8"
+        )
+        with patch.object(
+            driver_module,
+            "build_attempt_packet",
+            side_effect=AssertionError("Attempt Packet must be reused"),
+        ):
+            resumed = run_one_task(
+                self.state,
+                REQUEST,
+                TASKS[0],
+                self.workspace_root,
+                str(FIXTURE_BINARY),
+                implementer_identity="implementer-m7",
+                verifier_identity="verifier-m7",
+                expected_output_digest=self.expected_output_digest,
+                admitted_tasks=TASKS,
+            )
+
+        self.assertEqual(resumed.run_id, run_id)
+        self.assertIsNotNone(resumed.receipt)
+        self.assertEqual(
+            resumed.attempt_value.workspace_snapshot_digest,
+            before_resume.attempt_packet.workspace_snapshot_digest,
+        )
+
+    def test_distinct_requests_with_identical_tasks_get_distinct_runs(self) -> None:
+        first = self.run_driver()
+        second_request = RequestV1(
+            objective="Run a different linear M7 workflow",
+            scope=REQUEST.scope,
+            acceptance_criteria=REQUEST.acceptance_criteria,
+        )
+
+        second = self.run_driver(request=second_request)
+
+        self.assertTrue(first.workflow_complete)
+        self.assertTrue(second.workflow_complete)
+        self.assertNotEqual(
+            tuple(item.run_id for item in first.task_results),
+            tuple(item.run_id for item in second.task_results),
+        )
+        self.assertEqual(
+            len([p for p in (Path(self.state) / "runs").iterdir() if p.is_dir()]), 4
         )
 
 

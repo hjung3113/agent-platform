@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from pathlib import Path
 
 from kernel.canonical import content_digest
 from kernel.protocol import (
@@ -17,7 +18,13 @@ from kernel.protocol_v1 import (
     WorkflowRevisionV1,
     schema_version_for_kind,
 )
-from kernel.publish import Published, PublishRejectionCode, Rejected, publish
+from kernel.publish import (
+    Published,
+    PublishRejectionCode,
+    Rejected,
+    find_committed_run_for_idempotency_key,
+    publish,
+)
 
 
 REQUEST_CONTENT_DIGEST = content_digest({"fixture": "m7-request"})
@@ -152,6 +159,27 @@ class PublishM7Tests(unittest.TestCase):
         self.assertIsInstance(result, Published)
         assert isinstance(result, Published)
         return request, result
+
+    def test_missing_read_only_lookup_does_not_create_a_run(self) -> None:
+        self.assertIsNone(
+            find_committed_run_for_idempotency_key(
+                self.state,
+                "missing-m7-request",
+                content_digest({"fixture": "missing-request"}),
+            )
+        )
+        self.assertFalse((Path(self.state) / "runs").exists())
+
+    def test_read_only_lookup_returns_matching_committed_run(self) -> None:
+        request = self.publish_request()
+
+        found = find_committed_run_for_idempotency_key(
+            self.state,
+            "m7-request",
+            request.record_ref.content_digest,
+        )
+
+        self.assertEqual(found, request.run_id)
 
     def test_multi_task_workflow_publishes_and_any_task_id_binds(self) -> None:
         request, workflow = self.publish_two_task_workflow()

@@ -517,6 +517,29 @@ def _find_genesis_idempotent_publish(
     return None
 
 
+def find_committed_run_for_idempotency_key(
+    state: str, idempotency_key: str, expected_digest: str
+) -> str | None:
+    """Find a committed genesis run without creating one on a miss.
+
+    This is the read-only counterpart to the genesis portion of ``publish``.
+    It deliberately reuses the same lookup path, which scans only committed
+    sequence-1 records and never calls ``open_run`` or allocates a run id.
+    """
+
+    recovered = _find_genesis_idempotent_publish(
+        state, idempotency_key, expected_digest
+    )
+    if recovered is None:
+        return None
+    if isinstance(recovered, Rejected):
+        raise RuntimeError(
+            "genesis idempotency lookup rejected: "
+            f"{recovered.code}:{recovered.reason}"
+        )
+    return recovered.run_id
+
+
 def _genesis_record_ref(run: RunHandle) -> RecordRef:
     """Read the run's sequence-1 genesis Request publication identity."""
 

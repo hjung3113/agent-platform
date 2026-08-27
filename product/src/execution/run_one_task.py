@@ -26,8 +26,14 @@ from kernel.protocol_v1 import (
 from kernel.publish import (
     Published,
     Rejected,
+    find_committed_run_for_idempotency_key,
     publish,
     read_committed_contract,
+)
+from kernel.replay import RunState, replay
+from kernel.workflow_eligibility import (
+    WorkflowEligibilityStatus,
+    project_workflow_eligibility,
 )
 
 from execution import host
@@ -115,12 +121,14 @@ def workflow_task_sequence_digest(tasks: tuple[TaskV1, ...]) -> str:
 
 
 def workflow_record_idempotency_key(
-    tasks: tuple[TaskV1, ...], task_id: str, record: str
+    request: RequestV1, tasks: tuple[TaskV1, ...], task_id: str, record: str
 ) -> str:
     """Derive a collision-resistant key for one record in one task run."""
 
+    request_identity = content_digest(request.to_canonical_value())
     return content_digest(
         {
+            "request_identity": request_identity,
             "workflow_revision_digest": workflow_task_sequence_digest(tasks),
             "task_id": task_id,
             "record": record,
@@ -300,7 +308,7 @@ def run_one_task(
         if admitted_tasks is None:
             return f"{idempotency_prefix}-{record}"
         return workflow_record_idempotency_key(
-            admitted_tasks, task.task_id, record
+            request, admitted_tasks, task.task_id, record
         )
 
     request_published = _require_published(
@@ -330,29 +338,37 @@ def run_one_task(
         ),
     )
 
-    attempt_value = build_attempt_packet(
-        workflow_revision_ref=workflow_published.record_ref,
-        task_id=task.task_id,
-        implementer_identity=implementer_identity,
-        state=state,
-        run_id=request_published.run_id,
-        task=task,
-        workspace_root=workspace_root,
-        opencode_binary_path=opencode_binary_path,
-        config_paths=config_paths,
-        declared_generated_paths=declared_generated_paths,
-        contract_refs=contract_refs,
+    existing_attempt = _read_existing_contract(
+        state, request_published.run_id, ContractKind.ATTEMPT_PACKET
     )
-    attempt_published = _require_published(
-        "attempt_packet",
-        publish(
-            state,
-            request_published.run_id,
-            _as_candidate("attempt_packet", attempt_value),
-            workflow_published.record_ref,
-            idempotency_key("attempt"),
-        ),
-    )
+    if existing_attempt is None:
+        attempt_value = build_attempt_packet(
+            workflow_revision_ref=workflow_published.record_ref,
+            task_id=task.task_id,
+            implementer_identity=implementer_identity,
+            state=state,
+            run_id=request_published.run_id,
+            task=task,
+            workspace_root=workspace_root,
+            opencode_binary_path=opencode_binary_path,
+            config_paths=config_paths,
+            declared_generated_paths=declared_generated_paths,
+            contract_refs=contract_refs,
+        )
+        attempt_published = _require_published(
+            "attempt_packet",
+            publish(
+                state,
+                request_published.run_id,
+                _as_candidate("attempt_packet", attempt_value),
+                workflow_published.record_ref,
+                idempotency_key("attempt"),
+            ),
+        )
+    else:
+        attempt_published, attempt_value = existing_attempt
+        if not isinstance(attempt_value, AttemptPacketV1):
+            raise RuntimeError("committed_attempt_packet_is_not_current_attempt_packet_v1")
 
     # Evidence-only recompile with identical inputs (pure, side-effect-free);
     # by construction it must reproduce the packet's compiled context digest.
@@ -500,7 +516,7 @@ def run_workflow(
     *,
     implementer_identity: str,
     verifier_identity: str,
-    expected_output_digest: str,
+    expected_output_digests: tuple[str, ...],
     config_paths: tuple[Path, ...] = (),
     declared_generated_paths: tuple[str, ...] = (),
     contract_refs: tuple[RecordRef, ...] = (),
@@ -509,12 +525,49 @@ def run_workflow(
 
     if not tasks:
         raise ValueError("workflow_tasks_must_be_non_empty")
+    if len(expected_output_digests) != len(tasks):
+        raise ValueError("expected_output_digests_must_match_workflow_tasks")
     task_ids = tuple(task.task_id for task in tasks)
     if len(task_ids) != len(set(task_ids)):
         raise ValueError(f"workflow_task_ids_must_be_unique={task_ids!r}")
 
-    results: list[RunOneTaskResult] = []
+    request_identity = content_digest(request.to_canonical_value())
+    request_content_digest = content_digest(
+        {
+            "contract_kind": ContractKind.REQUEST.value,
+            "protocol_version": PROTOCOL_VERSION,
+            "schema_version": schema_version_for_kind(ContractKind.REQUEST),
+            "payload": request.to_canonical_value(),
+        }
+    )
+    candidate_revision = WorkflowRevisionV1(
+        request=RecordRef(
+            contract_kind=ContractKind.REQUEST.value,
+            record_id="workflow-eligibility-projection",
+            content_digest=request_identity,
+        ),
+        tasks=tasks,
+    )
+    task_runs: dict[str, RunState] = {}
     for task in tasks:
+        run_id = find_committed_run_for_idempotency_key(
+            state,
+            workflow_record_idempotency_key(
+                request, tasks, task.task_id, "request"
+            ),
+            request_content_digest,
+        )
+        if run_id is not None:
+            task_runs[task.task_id] = replay(state, run_id)
+
+    results: list[RunOneTaskResult] = []
+    materialized: dict[str, RunOneTaskResult] = {}
+
+    def materialize(index: int) -> RunOneTaskResult:
+        task = tasks[index]
+        existing = materialized.get(task.task_id)
+        if existing is not None:
+            return existing
         result = run_one_task(
             state,
             request,
@@ -523,18 +576,35 @@ def run_workflow(
             opencode_binary_path,
             implementer_identity=implementer_identity,
             verifier_identity=verifier_identity,
-            expected_output_digest=expected_output_digest,
+            expected_output_digest=expected_output_digests[index],
             config_paths=config_paths,
             declared_generated_paths=declared_generated_paths,
             contract_refs=contract_refs,
             admitted_tasks=tasks,
         )
+        materialized[task.task_id] = result
         results.append(result)
-        if result.verification_value.verdict != "PASS":
+        task_runs[task.task_id] = replay(state, result.run_id)
+        return result
+
+    while True:
+        eligibility = project_workflow_eligibility(candidate_revision, task_runs)
+        if eligibility.status is WorkflowEligibilityStatus.WORKFLOW_COMPLETE:
+            for index in range(len(tasks)):
+                materialize(index)
+            return RunWorkflowResult(task_results=tuple(results))
+        if eligibility.status is WorkflowEligibilityStatus.WORKFLOW_BLOCKED:
+            assert eligibility.task is not None
+            blocked_index = task_ids.index(eligibility.task.task_id)
+            for index in range(blocked_index + 1):
+                materialize(index)
             return RunWorkflowResult(
                 task_results=tuple(results),
-                blocked_task=task,
-                reason=result.verification_value.verdict,
+                blocked_task=eligibility.task,
+                reason=eligibility.reason,
             )
 
-    return RunWorkflowResult(task_results=tuple(results))
+        assert eligibility.task is not None
+        eligible_index = task_ids.index(eligibility.task.task_id)
+        for index in range(eligible_index + 1):
+            materialize(index)

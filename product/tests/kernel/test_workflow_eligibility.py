@@ -34,13 +34,24 @@ def run_state(
     *,
     head: str | None = None,
     verdict: str | None = None,
+    task_id: str | None = None,
 ) -> RunState:
+    packet_task_id = task_id
+    if packet_task_id is None and workflow_revision is not None:
+        packet_task_id = workflow_revision.tasks[0].task_id
+    has_attempt_packet = workflow_revision is not None and (
+        head is not None or verdict is not None
+    )
     return RunState(
         request=object() if workflow_revision is not None else None,
         workflow_revision=workflow_revision,
         last_sequence=0 if head is None else 1,
         last_record_id=None,
-        attempt_packet=object() if head == "attempt_packet" else None,
+        attempt_packet=(
+            SimpleNamespace(task_id=packet_task_id)
+            if has_attempt_packet
+            else None
+        ),
         result=object() if head == "result" else None,
         verification=(SimpleNamespace(verdict=verdict) if verdict is not None else None),
         receipt=(SimpleNamespace(receipt_type="terminal") if head == "receipt" else None),
@@ -60,7 +71,9 @@ class WorkflowEligibilityTests(unittest.TestCase):
 
     def test_all_pass_receipts_make_workflow_complete(self) -> None:
         states = {
-            task.task_id: run_state(revision(), head="receipt", verdict="PASS")
+            task.task_id: run_state(
+                revision(), head="receipt", verdict="PASS", task_id=task.task_id
+            )
             for task in TASKS
         }
 
@@ -71,8 +84,10 @@ class WorkflowEligibilityTests(unittest.TestCase):
 
     def test_fail_blocks_at_that_task(self) -> None:
         states = {
-            "task-1": run_state(revision(), head="receipt", verdict="PASS"),
-            "task-2": run_state(revision(), verdict="FAIL"),
+            "task-1": run_state(
+                revision(), head="receipt", verdict="PASS", task_id="task-1"
+            ),
+            "task-2": run_state(revision(), verdict="FAIL", task_id="task-2"),
         }
 
         result = project_workflow_eligibility(revision(), states)
@@ -116,6 +131,60 @@ class WorkflowEligibilityTests(unittest.TestCase):
         self.assertEqual(result.status, WorkflowEligibilityStatus.NEXT_TASK)
         self.assertEqual(result.task, TASKS[0])
 
+    def test_attempt_packet_task_identity_mismatch_fails_closed(self) -> None:
+        with self.assertRaises(WorkflowEligibilityRejected) as raised:
+            project_workflow_eligibility(
+                revision(),
+                {
+                    "task-1": run_state(
+                        revision(),
+                        head="receipt",
+                        verdict="PASS",
+                        task_id="task-2",
+                    )
+                },
+            )
+
+        self.assertEqual(
+            raised.exception.code,
+            WorkflowEligibilityRejectionCode.TASK_IDENTITY_MISMATCH,
+        )
+
+    def test_later_in_flight_task_before_earlier_task_fails_closed(self) -> None:
+        with self.assertRaises(WorkflowEligibilityRejected) as raised:
+            project_workflow_eligibility(
+                revision(),
+                {
+                    "task-2": run_state(
+                        revision(), head="attempt_packet", task_id="task-2"
+                    )
+                },
+            )
+
+        self.assertEqual(
+            raised.exception.code,
+            WorkflowEligibilityRejectionCode.TASK_ORDER_VIOLATION,
+        )
+
+    def test_later_complete_task_before_earlier_task_fails_closed(self) -> None:
+        with self.assertRaises(WorkflowEligibilityRejected) as raised:
+            project_workflow_eligibility(
+                revision(),
+                {
+                    "task-2": run_state(
+                        revision(),
+                        head="receipt",
+                        verdict="PASS",
+                        task_id="task-2",
+                    )
+                },
+            )
+
+        self.assertEqual(
+            raised.exception.code,
+            WorkflowEligibilityRejectionCode.TASK_ORDER_VIOLATION,
+        )
+
     def test_task_sequence_digest_ignores_legitimate_per_run_request_refs(self) -> None:
         other_request_revision = WorkflowRevisionV1(
             request=RecordRef(
@@ -127,13 +196,19 @@ class WorkflowEligibilityTests(unittest.TestCase):
         result = project_workflow_eligibility(
             revision(),
             {
-                "task-1": run_state(revision()),
-                "task-2": run_state(other_request_revision),
+                "task-1": run_state(
+                    revision(), head="receipt", verdict="PASS", task_id="task-1"
+                ),
+                "task-2": run_state(
+                    other_request_revision,
+                    head="attempt_packet",
+                    task_id="task-2",
+                ),
             },
         )
 
         self.assertEqual(result.status, WorkflowEligibilityStatus.NEXT_TASK)
-        self.assertEqual(result.task, TASKS[0])
+        self.assertEqual(result.task, TASKS[1])
 
     def test_task_sequence_digest_divergence_fails_closed(self) -> None:
         divergent = (

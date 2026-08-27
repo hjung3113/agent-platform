@@ -26,6 +26,8 @@ class WorkflowEligibilityRejectionCode(StrEnum):
     UNKNOWN_TASK_ID = "unknown_task_id"
     WORKFLOW_REVISION_TASK_ID_DUPLICATE = "workflow_revision_task_id_duplicate"
     WORKFLOW_REVISION_DIGEST_DIVERGENCE = "workflow_revision_digest_divergence"
+    TASK_IDENTITY_MISMATCH = "task_identity_mismatch"
+    TASK_ORDER_VIOLATION = "task_order_violation"
     AMBIGUOUS_RUN_STATE = "ambiguous_run_state"
 
 
@@ -100,9 +102,16 @@ def _validate_revision_copies(
         )
 
 
-def _state_kind(state: RunState | None) -> str:
+def _state_kind(task_id: str, state: RunState | None) -> str:
     if state is None:
         return "not_started"
+    if state.attempt_packet is not None:
+        committed_task_id = getattr(state.attempt_packet, "task_id", None)
+        if committed_task_id != task_id:
+            raise WorkflowEligibilityRejected(
+                WorkflowEligibilityRejectionCode.TASK_IDENTITY_MISMATCH,
+                f"expected_task_id={task_id!r} observed={committed_task_id!r}",
+            )
     if state.receipt is not None:
         if (
             getattr(state.receipt, "receipt_type", None) == "terminal"
@@ -166,8 +175,20 @@ def project_workflow_eligibility(
 
     _validate_revision_copies(admitted_revision, task_runs)
 
-    for task in admitted_revision.tasks:
-        kind = _state_kind(task_runs.get(task.task_id))
+    state_kinds = tuple(
+        _state_kind(task.task_id, task_runs.get(task.task_id))
+        for task in admitted_revision.tasks
+    )
+    for index, kind in enumerate(state_kinds):
+        if kind != "not_started" and any(
+            earlier_kind != "complete" for earlier_kind in state_kinds[:index]
+        ):
+            raise WorkflowEligibilityRejected(
+                WorkflowEligibilityRejectionCode.TASK_ORDER_VIOLATION,
+                f"task_index={index} kind={kind!r} earlier={state_kinds[:index]!r}",
+            )
+
+    for task, kind in zip(admitted_revision.tasks, state_kinds):
         if kind == "complete":
             continue
         if kind in {"fail", "blocked"}:
