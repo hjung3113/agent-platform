@@ -153,14 +153,31 @@ class TaskDependencyGraphRejected(ProtocolRejected):
 
 @dataclass(frozen=True)
 class WorkflowRevisionV1:
-    """Ordered task-sequence Workflow Revision bound to an exact Request."""
+    """Ordered task-sequence Workflow Revision bound to an exact Request.
+
+    ``schema_version`` records which wire shape produced this value (3: the
+    current dependency-aware shape; 2: the retained pre-slice-2 shape with no
+    ``depends_on`` on any task). It exists solely so ``to_canonical_value()``
+    can faithfully reproduce the shape this value was actually read from —
+    every other reader in this module already guarantees
+    ``ReaderOutcome.value.to_canonical_value() == ReaderOutcome.canonical_payload``,
+    and a v2-read revision reusing this same type must keep that guarantee
+    too, rather than silently re-canonicalizing as v3. It does not affect
+    execution-identity digests derived directly from ``TaskV1.to_canonical_value()``
+    (e.g. ``workflow_task_sequence_digest`` in ``execution/run_one_task.py``),
+    which intentionally stay schema-version-agnostic — that is the documented,
+    tested v2->v3 idempotency-key behavior (plan HIGH-3), unchanged by this.
+    """
 
     request: RecordRef
     tasks: tuple[TaskV1, ...]
+    schema_version: int = 3
 
     def to_canonical_value(self) -> dict[str, Any]:
         return _workflow_revision_canonical_value(
-            self.request, self.tasks, include_dependencies=True
+            self.request,
+            self.tasks,
+            include_dependencies=(self.schema_version != 2),
         )
 
 
@@ -772,12 +789,9 @@ def read_legacy_workflow_revision_v1_v2(payload: Any) -> ReaderOutcome:
         "workflow_revision_tasks",
         lambda item: _read_task_without_dependencies(item, reject_new_field=True),
     )
-    revision = WorkflowRevisionV1(request=request, tasks=tasks)
+    revision = WorkflowRevisionV1(request=request, tasks=tasks, schema_version=2)
     return ReaderOutcome(
-        value=revision,
-        canonical_payload=_workflow_revision_canonical_value(
-            request, tasks, include_dependencies=False
-        ),
+        value=revision, canonical_payload=revision.to_canonical_value()
     )
 
 

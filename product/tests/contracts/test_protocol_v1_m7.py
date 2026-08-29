@@ -52,7 +52,11 @@ class WorkflowRevisionV1M7ReaderTests(unittest.TestCase):
                     TaskV1("task-1", "Objective for task-1", ("Criterion for task-1",), ()),
                     TaskV1("task-2", "Objective for task-2", ("Criterion for task-2",), ()),
                 ),
+                schema_version=2,
             ),
+        )
+        self.assertEqual(
+            result.value.value.to_canonical_value(), result.value.envelope.payload
         )
 
     def test_schema_v2_rejects_empty_tasks(self) -> None:

@@ -117,6 +117,37 @@ class ProtocolV1M7Slice2Tests(unittest.TestCase):
             ProtocolRejectionCode.UNSUPPORTED_SCHEMA_VERSION,
         )
 
+    def test_schema_v2_typed_value_round_trips_without_introducing_depends_on(
+        self,
+    ) -> None:
+        """A replayed-v2 typed value must not silently canonicalize as v3.
+
+        Round-1 PR review found that ``WorkflowRevisionV1.to_canonical_value()``
+        always emitted ``depends_on`` regardless of which schema version
+        actually produced the value, so ``ReaderOutcome.value.to_canonical_value()``
+        diverged from ``ReaderOutcome.canonical_payload`` for the retained v2
+        reader specifically — the one place in this module where that
+        equality did not already hold by construction. This asserts the
+        equality holds for v2 too, and that the typed value's own
+        re-canonicalization never introduces a ``depends_on`` key that was
+        never in the original wire payload.
+        """
+
+        legacy = read_candidate(
+            workflow_envelope(
+                workflow_payload(
+                    [legacy_task_payload("task-1"), legacy_task_payload("task-2")]
+                ),
+                2,
+            )
+        )
+        self.assertTrue(legacy.ok, legacy.reason)
+
+        retyped = legacy.value.value.to_canonical_value()
+        self.assertEqual(retyped, legacy.value.envelope.payload)
+        for retyped_task in retyped["tasks"]:
+            self.assertNotIn("depends_on", retyped_task)
+
     def test_schema_v1_legacy_task_gets_empty_dependencies(self) -> None:
         result = read_candidate(
             workflow_envelope(
