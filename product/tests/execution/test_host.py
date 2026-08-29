@@ -59,6 +59,7 @@ TASK = TaskV1(
     task_id="task-host-1",
     objective="Prove the Host actually receives the admitted task",
     acceptance_criteria=("The runtime message contains the task objective",),
+    depends_on=(),
 )
 
 
@@ -788,6 +789,7 @@ class HostExecuteTest(unittest.TestCase):
             task_id=TASK.task_id,
             objective="objective that was never published for this run",
             acceptance_criteria=TASK.acceptance_criteria,
+            depends_on=(),
         )
 
         with self._no_required_capabilities():

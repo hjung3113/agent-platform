@@ -36,7 +36,7 @@ def workflow_envelope(payload: object) -> dict:
     return {
         "contract_kind": "workflow_revision",
         "protocol_version": 1,
-        "schema_version": 2,
+        "schema_version": 3,
         "payload": payload,
     }
 
@@ -61,6 +61,7 @@ def valid_workflow_payload() -> dict:
                 "task_id": "task-1",
                 "objective": "Implement exact dispatch",
                 "acceptance_criteria": ["Dispatch is exact"],
+                "depends_on": [],
             }
         ],
     }
@@ -188,6 +189,7 @@ class WorkflowRevisionV1Tests(unittest.TestCase):
                     task_id="task-1",
                     objective="Implement exact dispatch",
                     acceptance_criteria=("Dispatch is exact",),
+                    depends_on=(),
                 ),
             ),
         )
@@ -261,6 +263,7 @@ class WorkflowRevisionV1Tests(unittest.TestCase):
                 "task_id": "task-2",
                 "objective": "Implement the second step",
                 "acceptance_criteria": ["The second step is exact"],
+                "depends_on": [],
             }
         )
         result = read_workflow(payload)

@@ -60,6 +60,7 @@ def workflow_candidate(parent: RecordRef, criteria: list[str]) -> ParsedCandidat
                     "task_id": "task-m6",
                     "objective": "Exercise hardened evidence publication",
                     "acceptance_criteria": criteria,
+                    "depends_on": [],
                 }
             ],
         },

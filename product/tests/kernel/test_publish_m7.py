@@ -67,6 +67,7 @@ def task_payload(task_id: str, criteria: list[str]) -> dict:
         "task_id": task_id,
         "objective": f"Objective for {task_id}",
         "acceptance_criteria": criteria,
+        "depends_on": [],
     }
 
 
@@ -244,15 +245,15 @@ class PublishM7Tests(unittest.TestCase):
         duplicate = WorkflowRevisionV1(
             request=request.record_ref,
             tasks=(
-                TaskV1("same", "first", ("first criterion",)),
-                TaskV1("same", "second", ("second criterion",)),
+                TaskV1("same", "first", ("first criterion",), ()),
+                TaskV1("same", "second", ("second criterion",), ()),
             ),
         )
         candidate = ParsedCandidate(
             envelope=CandidateEnvelope(
                 contract_kind=ContractKind.WORKFLOW_REVISION,
                 protocol_version=1,
-                schema_version=2,
+                schema_version=3,
                 payload=duplicate.to_canonical_value(),
             ),
             value=duplicate,

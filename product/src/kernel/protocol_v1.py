@@ -11,7 +11,9 @@ runtime selection, evidence policy, or release state is represented here.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from kernel.canonical import content_digest
@@ -29,8 +31,9 @@ from kernel.runtime_capability import _require_versioned_identity
 
 PROTOCOL_VERSION = 1
 SCHEMA_VERSION = 1
-# Reader/function names remain protocol-v1 names; the current Result wire shape is schema 2.
-WORKFLOW_REVISION_SCHEMA_VERSION = 2
+# Reader/function names remain protocol-v1 names; the current Workflow Revision is schema 3
+# and the current Result wire shape is schema 2.
+WORKFLOW_REVISION_SCHEMA_VERSION = 3
 RESULT_SCHEMA_VERSION = 2
 VERIFICATION_SCHEMA_VERSION = 3
 
@@ -38,6 +41,7 @@ _REQUEST_KEYS = frozenset({"objective", "scope", "acceptance_criteria"})
 _WORKFLOW_REVISION_KEYS = frozenset({"request", "tasks"})
 _LEGACY_WORKFLOW_REVISION_KEYS = frozenset({"request", "task"})
 _TASK_KEYS = frozenset({"task_id", "objective", "acceptance_criteria"})
+_TASK_V3_KEYS = frozenset((*_TASK_KEYS, "depends_on"))
 _ATTEMPT_PACKET_KEYS = frozenset(
     {
         "workflow_revision",
@@ -120,27 +124,61 @@ class TaskV1:
     task_id: str
     objective: str
     acceptance_criteria: tuple[str, ...]
+    depends_on: tuple[str, ...]
 
     def to_canonical_value(self) -> dict[str, Any]:
-        return {
-            "task_id": self.task_id,
-            "objective": self.objective,
-            "acceptance_criteria": list(self.acceptance_criteria),
-        }
+        return _task_canonical_value(self, include_dependencies=True)
+
+
+class TaskDependencyGraphFailure(StrEnum):
+    """Structured failure kinds emitted by dependency-graph validation."""
+
+    DUPLICATE_TASK_ID = "duplicate_task_id"
+    MALFORMED_DEPENDENCY = "malformed_dependency"
+    UNKNOWN_DEPENDENCY = "unknown_dependency"
+    SELF_DEPENDENCY = "self_dependency"
+    DUPLICATE_DEPENDENCY = "duplicate_dependency"
+    DEPENDENCY_CYCLE = "dependency_cycle"
+
+
+class TaskDependencyGraphRejected(ProtocolRejected):
+    """Typed protocol rejection with a dependency-check discriminator."""
+
+    def __init__(
+        self, failure: TaskDependencyGraphFailure, reason: str
+    ) -> None:
+        super().__init__(ProtocolRejectionCode.MALFORMED_PAYLOAD, reason)
+        self.failure = failure
 
 
 @dataclass(frozen=True)
 class WorkflowRevisionV1:
-    """Ordered task-sequence Workflow Revision bound to an exact Request."""
+    """Ordered task-sequence Workflow Revision bound to an exact Request.
+
+    ``schema_version`` records which wire shape produced this value (3: the
+    current dependency-aware shape; 2: the retained pre-slice-2 shape with no
+    ``depends_on`` on any task). It exists solely so ``to_canonical_value()``
+    can faithfully reproduce the shape this value was actually read from —
+    every other reader in this module already guarantees
+    ``ReaderOutcome.value.to_canonical_value() == ReaderOutcome.canonical_payload``,
+    and a v2-read revision reusing this same type must keep that guarantee
+    too, rather than silently re-canonicalizing as v3. It does not affect
+    execution-identity digests derived directly from ``TaskV1.to_canonical_value()``
+    (e.g. ``workflow_task_sequence_digest`` in ``execution/run_one_task.py``),
+    which intentionally stay schema-version-agnostic — that is the documented,
+    tested v2->v3 idempotency-key behavior (plan HIGH-3), unchanged by this.
+    """
 
     request: RecordRef
     tasks: tuple[TaskV1, ...]
+    schema_version: int = 3
 
     def to_canonical_value(self) -> dict[str, Any]:
-        return {
-            "request": self.request.to_canonical_value(),
-            "tasks": [task.to_canonical_value() for task in self.tasks],
-        }
+        return _workflow_revision_canonical_value(
+            self.request,
+            self.tasks,
+            include_dependencies=(self.schema_version != 2),
+        )
 
 
 @dataclass(frozen=True)
@@ -153,7 +191,7 @@ class _LegacyWorkflowRevisionV1:
     def to_canonical_value(self) -> dict[str, Any]:
         return {
             "request": self.request.to_canonical_value(),
-            "task": self.task.to_canonical_value(),
+            "task": _task_canonical_value(self.task, include_dependencies=False),
         }
 
 
@@ -385,6 +423,34 @@ class ReceiptV1:
         }
 
 
+def _task_canonical_value(
+    task: TaskV1, *, include_dependencies: bool
+) -> dict[str, Any]:
+    value = {
+        "task_id": task.task_id,
+        "objective": task.objective,
+        "acceptance_criteria": list(task.acceptance_criteria),
+    }
+    if include_dependencies:
+        value["depends_on"] = list(task.depends_on)
+    return value
+
+
+def _workflow_revision_canonical_value(
+    request: RecordRef,
+    tasks: tuple[TaskV1, ...],
+    *,
+    include_dependencies: bool,
+) -> dict[str, Any]:
+    return {
+        "request": request.to_canonical_value(),
+        "tasks": [
+            _task_canonical_value(task, include_dependencies=include_dependencies)
+            for task in tasks
+        ],
+    }
+
+
 def request_v1_content_digest(request: RequestV1) -> str:
     """Content identity of a Request candidate (no publication metadata)."""
 
@@ -525,7 +591,42 @@ def _require_string_sequence(
     return tuple(items)
 
 
-def _require_task_sequence(value: Any, what: str) -> tuple[TaskV1, ...]:
+def _read_task_v1(payload: Any) -> TaskV1:
+    task = _require_object(payload, "task")
+    _require_exact_keys(task, _TASK_V3_KEYS, "task")
+    return TaskV1(
+        task_id=_require_nonempty_string(task["task_id"], "task_id"),
+        objective=_require_nonempty_string(task["objective"], "task_objective"),
+        acceptance_criteria=_require_string_sequence(
+            task["acceptance_criteria"], "task_acceptance_criteria", allow_empty=False
+        ),
+        depends_on=_require_string_sequence(
+            task["depends_on"], "task_depends_on", allow_empty=True
+        ),
+    )
+
+
+def _read_task_without_dependencies(payload: Any, *, reject_new_field: bool) -> TaskV1:
+    task = _require_object(payload, "task")
+    if reject_new_field and "depends_on" in task:
+        raise ProtocolRejected(
+            ProtocolRejectionCode.UNSUPPORTED_SCHEMA_VERSION,
+            "task_depends_on_requires_schema_version_3",
+        )
+    _require_exact_keys(task, _TASK_KEYS, "task")
+    return TaskV1(
+        task_id=_require_nonempty_string(task["task_id"], "task_id"),
+        objective=_require_nonempty_string(task["objective"], "task_objective"),
+        acceptance_criteria=_require_string_sequence(
+            task["acceptance_criteria"], "task_acceptance_criteria", allow_empty=False
+        ),
+        depends_on=(),
+    )
+
+
+def _require_task_sequence(
+    value: Any, what: str, read_task: Any
+) -> tuple[TaskV1, ...]:
     if not isinstance(value, list):
         raise ProtocolRejected(
             ProtocolRejectionCode.MALFORMED_PAYLOAD, f"{what}_not_sequence"
@@ -535,7 +636,7 @@ def _require_task_sequence(value: Any, what: str) -> tuple[TaskV1, ...]:
     tasks = []
     task_ids: set[str] = set()
     for index, item in enumerate(value):
-        parsed = _read_task_v1(item)
+        parsed = read_task(item)
         if parsed.task_id in task_ids:
             raise ProtocolRejected(
                 ProtocolRejectionCode.MALFORMED_PAYLOAD,
@@ -544,6 +645,88 @@ def _require_task_sequence(value: Any, what: str) -> tuple[TaskV1, ...]:
         task_ids.add(parsed.task_id)
         tasks.append(parsed)
     return tuple(tasks)
+
+
+def _validate_task_dependency_graph(tasks: tuple[TaskV1, ...]) -> None:
+    """Validate dependency edges and reject a non-DAG task graph.
+
+    The graph is validated without I/O. Kahn's topological sort is deliberately
+    iterative so a generated deep workflow cannot exhaust Python's recursion
+    limit before receiving a typed protocol rejection.
+    """
+
+    task_ids = tuple(task.task_id for task in tasks)
+    task_id_set = set(task_ids)
+    if len(task_ids) != len(task_id_set):
+        raise TaskDependencyGraphRejected(
+            TaskDependencyGraphFailure.DUPLICATE_TASK_ID,
+            f"workflow_revision_duplicate_task_ids={task_ids!r}",
+        )
+
+    dependencies: dict[str, tuple[str, ...]] = {}
+    for task in tasks:
+        raw_dependencies: Any = task.depends_on
+        if isinstance(raw_dependencies, tuple):
+            raw_dependencies = list(raw_dependencies)
+        try:
+            dependencies[task.task_id] = _require_string_sequence(
+                raw_dependencies,
+                f"task[{task.task_id}]_depends_on",
+                allow_empty=True,
+            )
+        except ProtocolRejected as rejection:
+            raise TaskDependencyGraphRejected(
+                TaskDependencyGraphFailure.MALFORMED_DEPENDENCY,
+                rejection.reason,
+            ) from rejection
+
+    for task_id in task_ids:
+        task_dependencies = dependencies[task_id]
+        unknown = next(
+            (dependency for dependency in task_dependencies if dependency not in task_id_set),
+            None,
+        )
+        if unknown is not None:
+            raise TaskDependencyGraphRejected(
+                TaskDependencyGraphFailure.UNKNOWN_DEPENDENCY,
+                f"workflow_revision_unknown_dependency={task_id!r}->{unknown!r}",
+            )
+        if task_id in task_dependencies:
+            raise TaskDependencyGraphRejected(
+                TaskDependencyGraphFailure.SELF_DEPENDENCY,
+                f"workflow_revision_self_dependency={task_id!r}",
+            )
+        if len(task_dependencies) != len(set(task_dependencies)):
+            raise TaskDependencyGraphRejected(
+                TaskDependencyGraphFailure.DUPLICATE_DEPENDENCY,
+                f"workflow_revision_duplicate_dependency={task_id!r}",
+            )
+
+    remaining_dependencies = {
+        task_id: len(dependencies[task_id]) for task_id in task_ids
+    }
+    dependents: dict[str, list[str]] = {task_id: [] for task_id in task_ids}
+    for task_id in task_ids:
+        for dependency in dependencies[task_id]:
+            dependents[dependency].append(task_id)
+
+    ready = deque(
+        task_id for task_id in task_ids if remaining_dependencies[task_id] == 0
+    )
+    dequeued = 0
+    while ready:
+        task_id = ready.popleft()
+        dequeued += 1
+        for dependent in dependents[task_id]:
+            remaining_dependencies[dependent] -= 1
+            if remaining_dependencies[dependent] == 0:
+                ready.append(dependent)
+
+    if dequeued != len(task_ids):
+        raise TaskDependencyGraphRejected(
+            TaskDependencyGraphFailure.DEPENDENCY_CYCLE,
+            "workflow_revision_dependency_cycle",
+        )
 
 
 def read_request_v1(payload: Any) -> ReaderOutcome:
@@ -564,20 +747,8 @@ def read_request_v1(payload: Any) -> ReaderOutcome:
     )
 
 
-def _read_task_v1(payload: Any) -> TaskV1:
-    task = _require_object(payload, "task")
-    _require_exact_keys(task, _TASK_KEYS, "task")
-    return TaskV1(
-        task_id=_require_nonempty_string(task["task_id"], "task_id"),
-        objective=_require_nonempty_string(task["objective"], "task_objective"),
-        acceptance_criteria=_require_string_sequence(
-            task["acceptance_criteria"], "task_acceptance_criteria", allow_empty=False
-        ),
-    )
-
-
 def read_workflow_revision_v1(payload: Any) -> ReaderOutcome:
-    """Strictly read the current ordered task-sequence Workflow Revision."""
+    """Strictly read the current dependency-aware Workflow Revision."""
 
     candidate = _require_object(payload, "workflow_revision_payload")
     _require_exact_keys(candidate, _WORKFLOW_REVISION_KEYS, "workflow_revision_payload")
@@ -591,8 +762,34 @@ def read_workflow_revision_v1(payload: Any) -> ReaderOutcome:
             ProtocolRejectionCode.BINDING_MISMATCH,
             "workflow_revision_request_kind_not_request",
         )
-    tasks = _require_task_sequence(candidate["tasks"], "workflow_revision_tasks")
+    tasks = _require_task_sequence(
+        candidate["tasks"], "workflow_revision_tasks", _read_task_v1
+    )
+    _validate_task_dependency_graph(tasks)
     revision = WorkflowRevisionV1(request=request, tasks=tasks)
+    return ReaderOutcome(
+        value=revision, canonical_payload=revision.to_canonical_value()
+    )
+
+
+def read_legacy_workflow_revision_v1_v2(payload: Any) -> ReaderOutcome:
+    """Strictly read the retained pre-dependency task-sequence shape."""
+
+    candidate = _require_object(payload, "workflow_revision_payload")
+    _require_exact_keys(candidate, _WORKFLOW_REVISION_KEYS, "workflow_revision_payload")
+
+    request = read_record_ref(candidate["request"])
+    if request.contract_kind != ContractKind.REQUEST:
+        raise ProtocolRejected(
+            ProtocolRejectionCode.BINDING_MISMATCH,
+            "workflow_revision_request_kind_not_request",
+        )
+    tasks = _require_task_sequence(
+        candidate["tasks"],
+        "workflow_revision_tasks",
+        lambda item: _read_task_without_dependencies(item, reject_new_field=True),
+    )
+    revision = WorkflowRevisionV1(request=request, tasks=tasks, schema_version=2)
     return ReaderOutcome(
         value=revision, canonical_payload=revision.to_canonical_value()
     )
@@ -617,7 +814,9 @@ def read_legacy_workflow_revision_v1(payload: Any) -> ReaderOutcome:
             ProtocolRejectionCode.BINDING_MISMATCH,
             "workflow_revision_request_kind_not_request",
         )
-    task = _read_task_v1(candidate["task"])
+    task = _read_task_without_dependencies(
+        candidate["task"], reject_new_field=False
+    )
     revision = _LegacyWorkflowRevisionV1(request=request, task=task)
     return ReaderOutcome(
         value=revision, canonical_payload=revision.to_canonical_value()
@@ -1163,6 +1362,12 @@ register_reader(
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
     read_legacy_workflow_revision_v1,
+)
+register_reader(
+    ContractKind.WORKFLOW_REVISION,
+    PROTOCOL_VERSION,
+    2,
+    read_legacy_workflow_revision_v1_v2,
 )
 register_reader(
     ContractKind.WORKFLOW_REVISION,

@@ -53,7 +53,7 @@ def dispatch_workflow(
         {
             "contract_kind": "workflow_revision",
             "protocol_version": 1,
-            "schema_version": 2,
+            "schema_version": 3,
             "payload": {
                 "request": parent.to_canonical_value(),
                 "tasks": [
@@ -61,6 +61,7 @@ def dispatch_workflow(
                         "task_id": task_id,
                         "objective": "Wire the publish boundary",
                         "acceptance_criteria": ["Publish is fenced"],
+                        "depends_on": [],
                     }
                 ],
             },

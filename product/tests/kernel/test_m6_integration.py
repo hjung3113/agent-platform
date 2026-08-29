@@ -32,6 +32,7 @@ TASK = TaskV1(
         "The Verifier emits pinned evidence classes",
         "A failed criterion has an embedded open Finding",
     ),
+    depends_on=(),
 )
 DIFFERENT_EXPECTED_DIGEST = content_digest(
     {"fixture": "m6-integration", "expected_output": "different"}

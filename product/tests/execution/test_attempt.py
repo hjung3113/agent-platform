@@ -30,11 +30,13 @@ TASK = TaskV1(
     task_id=TASK_ID,
     objective="Prove real attempt-packet identities bind to published records",
     acceptance_criteria=("The Attempt Packet binds to the published Workflow Revision",),
+    depends_on=(),
 )
 SECOND_TASK = TaskV1(
     task_id="task-attempt-second",
     objective="Prove a later task can bind to the same revision",
     acceptance_criteria=("The later task is selected by task_id",),
+    depends_on=(),
 )
 
 
@@ -200,6 +202,7 @@ class AttemptPacketRealIdentityTest(unittest.TestCase):
             task_id=TASK_ID,
             objective="mutated objective not published in the Workflow Revision",
             acceptance_criteria=TASK.acceptance_criteria,
+            depends_on=(),
         )
         with self.assertRaises(attempt_module.TaskBindingMismatchError):
             build_attempt_packet(
@@ -232,6 +235,7 @@ class AttemptPacketRealIdentityTest(unittest.TestCase):
             task_id="task-attempt-unknown",
             objective="This task is not admitted",
             acceptance_criteria=("It must not bind",),
+            depends_on=(),
         )
 
         with self.assertRaises(attempt_module.TaskBindingMismatchError):

@@ -51,8 +51,11 @@ from kernel.protocol_v1 import (
     RequestV1,
     ResultV1,
     RESULT_SNAPSHOT_EVIDENCE_CLASS,
+    TaskDependencyGraphFailure,
+    TaskDependencyGraphRejected,
     VerificationV1,
     WorkflowRevisionV1,
+    _validate_task_dependency_graph,
     schema_version_for_kind,
 )
 
@@ -105,6 +108,11 @@ class PublishRejectionCode(StrEnum):
     RUN_ALREADY_TERMINAL = "run_already_terminal"
     STALE_SCHEMA_VERSION = "stale_schema_version"
     WORKFLOW_REVISION_TASK_ID_DUPLICATE = "workflow_revision_task_id_duplicate"
+    WORKFLOW_REVISION_UNKNOWN_DEPENDENCY = "workflow_revision_unknown_dependency"
+    WORKFLOW_REVISION_SELF_DEPENDENCY = "workflow_revision_self_dependency"
+    WORKFLOW_REVISION_DUPLICATE_DEPENDENCY = "workflow_revision_duplicate_dependency"
+    WORKFLOW_REVISION_DEPENDENCY_CYCLE = "workflow_revision_dependency_cycle"
+    WORKFLOW_REVISION_DEPENDENCY_MALFORMED = "workflow_revision_dependency_malformed"
     ATTEMPT_TASK_BINDING_MISMATCH = "attempt_task_binding_mismatch"
     RESULT_ATTEMPT_BINDING_MISMATCH = "result_attempt_binding_mismatch"
     RESULT_ENVIRONMENT_BINDING_MISMATCH = "result_environment_binding_mismatch"
@@ -326,6 +334,30 @@ def _kind_binding_rejection(
                 PublishRejectionCode.WORKFLOW_REVISION_TASK_ID_DUPLICATE,
                 f"duplicate_task_ids={task_ids!r}",
             )
+        try:
+            _validate_task_dependency_graph(value.tasks)
+        except TaskDependencyGraphRejected as rejection:
+            dependency_rejections = {
+                TaskDependencyGraphFailure.DUPLICATE_TASK_ID: (
+                    PublishRejectionCode.WORKFLOW_REVISION_TASK_ID_DUPLICATE
+                ),
+                TaskDependencyGraphFailure.MALFORMED_DEPENDENCY: (
+                    PublishRejectionCode.WORKFLOW_REVISION_DEPENDENCY_MALFORMED
+                ),
+                TaskDependencyGraphFailure.UNKNOWN_DEPENDENCY: (
+                    PublishRejectionCode.WORKFLOW_REVISION_UNKNOWN_DEPENDENCY
+                ),
+                TaskDependencyGraphFailure.SELF_DEPENDENCY: (
+                    PublishRejectionCode.WORKFLOW_REVISION_SELF_DEPENDENCY
+                ),
+                TaskDependencyGraphFailure.DUPLICATE_DEPENDENCY: (
+                    PublishRejectionCode.WORKFLOW_REVISION_DUPLICATE_DEPENDENCY
+                ),
+                TaskDependencyGraphFailure.DEPENDENCY_CYCLE: (
+                    PublishRejectionCode.WORKFLOW_REVISION_DEPENDENCY_CYCLE
+                ),
+            }
+            return Rejected(dependency_rejections[rejection.failure], rejection.reason)
         binding = verify_binding(value.request, _genesis_record_ref(run))
         if not binding.ok:
             return Rejected(

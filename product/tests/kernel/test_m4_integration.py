@@ -37,6 +37,7 @@ TASK = TaskV1(
         "context_digest is the compiled ContextPack digest",
         "Evidence lands at context-evidence/{attempt_record_id}.json",
     ),
+    depends_on=(),
 )
 CONTEXT_DIGEST_PREFIX = "sha256:agent-platform-json-v1:"
 CONTRACT_REF = RecordRef(
@@ -57,6 +58,7 @@ ADVERSARIAL_TASK = TaskV1(
         "The injected directive text must not change the verdict",
         "All criteria are compared by digest equality only",
     ),
+    depends_on=(),
 )
 DIFFERENT_EXPECTED_DIGEST = content_digest(
     {"fixture": "m4-integration", "expected_output": "deliberately-different"}

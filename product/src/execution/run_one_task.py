@@ -33,6 +33,7 @@ from kernel.publish import (
 from kernel.replay import RunState, replay
 from kernel.workflow_eligibility import (
     WorkflowEligibilityStatus,
+    _state_kind,
     project_workflow_eligibility,
 )
 
@@ -521,7 +522,7 @@ def run_workflow(
     declared_generated_paths: tuple[str, ...] = (),
     contract_refs: tuple[RecordRef, ...] = (),
 ) -> RunWorkflowResult:
-    """Run admitted tasks strictly in array order until the first non-PASS."""
+    """Run admitted tasks sequentially by deterministic DAG eligibility."""
 
     if not tasks:
         raise ValueError("workflow_tasks_must_be_non_empty")
@@ -530,6 +531,8 @@ def run_workflow(
     task_ids = tuple(task.task_id for task in tasks)
     if len(task_ids) != len(set(task_ids)):
         raise ValueError(f"workflow_task_ids_must_be_unique={task_ids!r}")
+    tasks_by_id = dict(zip(task_ids, tasks))
+    expected_output_digests_by_task_id = dict(zip(task_ids, expected_output_digests))
 
     request_identity = content_digest(request.to_canonical_value())
     request_content_digest = content_digest(
@@ -563,8 +566,8 @@ def run_workflow(
     results: list[RunOneTaskResult] = []
     materialized: dict[str, RunOneTaskResult] = {}
 
-    def materialize(index: int) -> RunOneTaskResult:
-        task = tasks[index]
+    def materialize(task_id: str) -> RunOneTaskResult:
+        task = tasks_by_id[task_id]
         existing = materialized.get(task.task_id)
         if existing is not None:
             return existing
@@ -576,7 +579,7 @@ def run_workflow(
             opencode_binary_path,
             implementer_identity=implementer_identity,
             verifier_identity=verifier_identity,
-            expected_output_digest=expected_output_digests[index],
+            expected_output_digest=expected_output_digests_by_task_id[task_id],
             config_paths=config_paths,
             declared_generated_paths=declared_generated_paths,
             contract_refs=contract_refs,
@@ -590,14 +593,14 @@ def run_workflow(
     while True:
         eligibility = project_workflow_eligibility(candidate_revision, task_runs)
         if eligibility.status is WorkflowEligibilityStatus.WORKFLOW_COMPLETE:
-            for index in range(len(tasks)):
-                materialize(index)
+            for task_id in task_ids:
+                materialize(task_id)
             return RunWorkflowResult(task_results=tuple(results))
         if eligibility.status is WorkflowEligibilityStatus.WORKFLOW_BLOCKED:
             assert eligibility.task is not None
-            blocked_index = task_ids.index(eligibility.task.task_id)
-            for index in range(blocked_index + 1):
-                materialize(index)
+            for task_id in task_ids:
+                if _state_kind(task_id, task_runs.get(task_id)) != "not_started":
+                    materialize(task_id)
             return RunWorkflowResult(
                 task_results=tuple(results),
                 blocked_task=eligibility.task,
@@ -605,6 +608,4 @@ def run_workflow(
             )
 
         assert eligibility.task is not None
-        eligible_index = task_ids.index(eligibility.task.task_id)
-        for index in range(eligible_index + 1):
-            materialize(index)
+        materialize(eligibility.task.task_id)

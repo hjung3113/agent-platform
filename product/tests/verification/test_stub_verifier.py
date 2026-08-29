@@ -22,6 +22,7 @@ TASK = TaskV1(
     task_id="task-1",
     objective="do the one thing",
     acceptance_criteria=("criterion one", "criterion two"),
+    depends_on=(),
 )
 EXPECTED = content_digest({"fixture": "expected-output"})
 VERIFIER_PROFILE_IDENTITY = content_digest({"fixture": "verifier-profile"})
