@@ -1,6 +1,84 @@
 # Handoff
 
-## Completed this milestone (M7 — orchestration expansion, slice 1: linear multiple tasks, merged)
+## Completed this milestone (M7 — orchestration expansion, slice 2: DAG dependency validation, merged)
+
+M7 slice 2 designed, reviewed, implemented, fixed, re-reviewed, and merged: [PR #50](https://github.com/hjung3113/agent-platform/pull/50)
+(squash-merged to `main` as `eadc857`). Tracking [Issue #4](https://github.com/hjung3113/agent-platform/issues/4), roadmap
+expansion-order step 2 only (not step 3, resource claims).
+
+- **Toolkit adopted this session**: [`feedbackops-workflow`](https://github.com/hjung3113/feedbackops-workflow)
+  (a separate personal repo — reusable multi-agent dispatch/review/verify toolkit) installed into this repo via
+  `scripts/install-into.sh` into the four managed leaves (`.agent-workflow/{scripts,schemas,docs/agents}`,
+  `.claude/skills/agent-workflow`) plus an `AGENTS.md` managed-marker pointer block. Project-owned files created:
+  `.agent-workflow/workflow-config.json` (orchestrator=cmux default, override per-dispatch),
+  `.agent-workflow/target-profile.json` (this repo's 4 unittest groups + compileall, `python3.12`, no setup step —
+  see file for exact argv). **Upgrade path**: `git pull` the toolkit repo, re-run `install-into.sh --upgrade` (preserves
+  `model-alloc.json`/`workflow-config.json`/`target-profile.json`, backs up prior managed-leaf content under
+  `.review/agent-workflow-install-backups/`). Already upgraded once this session (223 commits) with no issues.
+- **Working model-routing note (real gotcha hit twice this session)**: `opencode`'s `zai/glm-5.3` (pay-per-token)
+  returns `Insufficient balance or no resource package` — same account-balance issue HANDOFF already flagged as
+  possibly-live. **Fix: use `zai-coding-plan/glm-5.3` instead** (the coding-plan/subscription model alias) — this
+  one has balance and works. Use this alias for any future `glm-5.3` dispatch via opencode.
+- **Toolkit dispatch gotchas hit and worked around this session** (useful for the next reviewer/implementer dispatch
+  via `agent-workflow.sh dispatch`):
+  - `--orchestrator orca` defaults to `execution-mode live-tui`; a read-only role (e.g. `reviewer`) must pass
+    `--execution-mode headless` explicitly or it's refused (`live_tui_requires_implementation_write`).
+  - `--orchestrator cmux` requires being invoked from inside an actual cmux session (`Access denied - only
+    processes started inside cmux can connect`) — not usable from a plain shell; `orca` worked fine instead.
+  - **Always pass `--prompt-file` explicitly for `--role reviewer --produce-review`.** With no `--prompt-file`,
+    `dispatch-core.sh` defaults to `.review/ISSUE-N-PROMPT.md`/`.txt` — if a prior session (e.g. an
+    implementer's own internal self-review loop) left one there, the reviewer gets that stale prompt and
+    returns unparseable prose (`refused: unparseable_output`), not a real review of what you actually wanted
+    reviewed. Build the prompt with the review task plus
+    `"$PRODUCT_HOME/scripts/output-contract.sh" render --role reviewer` appended (the exact JSON schema block the
+    runtime must return), and pass it explicitly.
+  - **`target-verify.sh`'s content-hash check breaks if the worktree has no `.gitignore`** — it hashes
+    `git ls-files --cached --others --exclude-standard`, so `__pycache__/*.pyc` written mid-run by
+    `compileall`/`unittest` (untracked, not excluded without a gitignore) changes the before/after snapshot and
+    fails closed with `worktree changed during verification`. This repo's own `.gitignore` (added this session,
+    `744a17d`) fixes it for `main`/future worktrees branched after that commit; a worktree branched from a commit
+    before it needs a local (even uncommitted) `.gitignore` copied in for `target-verify.sh` to work.
+- **Plan**: [`docs/plans/active/m7-orchestration-expansion.md`](docs/plans/active/m7-orchestration-expansion.md),
+  new "M7 — Slice 2" section (S1–S13 pre-implementation, S14 folded post-implementation-review fixes) appended
+  after slice 1's untouched §1–§14. `TaskV1.depends_on: tuple[str, ...]` (required), `WORKFLOW_REVISION_SCHEMA_VERSION`
+  2→3 with legacy-reader retention, DAG admission at reader+publish (unknown ref/self-dep/duplicate-edge/cycle,
+  iterative Kahn's), `WorkflowEligibility.eligible_tasks` real ready-set with in-flight-resume inclusion, driver
+  rewritten to materialize by `task_id` not index range.
+- **Round-1 plan review**: `zai-coding-plan/glm-5.3` (effort `high`, via `opencode`, `--auto`) against the plan
+  draft + real code: **0 BLOCKER, 3 HIGH, 3 MEDIUM, 3 LOW** — all folded into the plan (§13) before dispatch. The
+  3 HIGH findings were real: (1) the eligible-set definition silently dropped slice 1's in-flight-resume rule,
+  contradicting a live test; (2) the driver sketch returned immediately on `WORKFLOW_COMPLETE`/`WORKFLOW_BLOCKED`
+  without materializing anything, breaking idempotent re-invocation; (3) adding `depends_on` to
+  `to_canonical_value()` silently orphans every pre-slice-2 workflow's idempotency keys across the schema
+  upgrade — accepted explicitly and tested, not silently absorbed.
+- **Implementation**: dispatched to `codex --model gpt-5.6-luna -c model_reasoning_effort=max` (non-interactive
+  `codex exec`, Orca-managed worktree `m7-orchestration-expansion-slice2`) — hit one real plan contradiction
+  before writing code (blanket `depends_on=()` migration for two existing regression tests would have made their
+  `TASK_ORDER_VIOLATION` assertions meaningless under pure dependency-based ordering; fixed in-plan: those two
+  tests declare an explicit `task-2.depends_on=("task-1",)` edge instead), redispatched, then ran **its own internal
+  review→fix→recheck loop autonomously** (picked up on the installed toolkit's `AGENTS.md` model-routing pointer
+  block and self-orchestrated using `.agent-workflow` conventions — `ISSUE-4-ROUND-STATE.json`,
+  `ISSUE-4-IMPL-REVIEW.md`, a self-review round finding 4 LOW findings all fixed in `ad3ac1a`, `ISSUE-4-FIX-RECHECK.md`
+  verdict CLEAN) — landed 3 commits (`456b851`/`ad3ac1a`/`3ac5862`), 426 tests green (contracts 162, kernel 143,
+  execution 113, verification 8, up from 395), pushed and opened PR #50 on its own.
+- **Independent post-hoc review** (separate orchestrator session, outside the implementer's own loop): toolkit-native
+  `agent-workflow.sh dispatch --orchestrator orca --runtime opencode --role reviewer --produce-review --model
+  zai-coding-plan/glm-5.3 --effort high --execution-mode headless` against `3ac5862`. Canonical `ISSUE-4-REVIEW.json`
+  published: **status pass**, 7/8 checklist items independently confirmed, 1 nit (private-symbol import), no
+  BLOCKER/HIGH. **Independent VERIFY** via `target-verify.sh`: **PASS 5/5**.
+- **Real HIGH finding from a human adversarial pass on the PR** (not caught by either automated review round):
+  `read_legacy_workflow_revision_v1_v2()` reused the v3 `WorkflowRevisionV1` type, whose `to_canonical_value()`
+  unconditionally serialized every task with `depends_on` — so a v2-read revision's typed canonicalization
+  silently diverged from its own `ReaderOutcome.canonical_payload` (an invariant every other reader in the module
+  keeps by construction). **Fixed** (`deea8cd`): added `schema_version: int = 3` field to `WorkflowRevisionV1` so
+  `to_canonical_value()` reproduces the shape it was actually read from; v2 legacy reader tags `schema_version=2`.
+  Verified this does NOT regress the already-accepted HIGH-3 idempotency-orphaning behavior — the digest functions
+  that must stay schema-agnostic (`workflow_task_sequence_digest`, `_validate_revision_copies`) iterate
+  `TaskV1.to_canonical_value()` directly, untouched by this fix. Added the requested regression test. 427 tests
+  green, independently re-verified (`target-verify.sh` PASS at `deea8cd`), pushed, PR comment posted, merged.
+- **Merged**: PR #50 squash-merged to `main` as `eadc857` after the fix above; worktree and local branch cleaned up.
+
+## Completed earlier this milestone (M7 — orchestration expansion, slice 1: linear multiple tasks, merged)
 
 M7 slice 1 designed, reviewed twice, implemented, fixed, and merged:
 [PR #49](https://github.com/hjung3113/agent-platform/pull/49) (squash-merged to `main` as
@@ -306,35 +384,48 @@ python3.12 -m compileall -q product/src product/tests                           
 - M1 — Kernel authoritative publication and replay spine, PR #41. See prior handoff commits
   for full detail if needed.
 
-## Next session — start M7 slice 2 (roadmap expansion-order step 2: DAG dependency validation)
+## Next session — start M7 slice 3 (roadmap expansion-order step 3: logical Resource Claims)
 
-M7 slice 1 is fully landed on `main` (`062c580`) — see "Completed this milestone" above. Next
-session should start the next expansion-order slice per the roadmap's 9-step M7 plan: step 2,
-DAG dependency validation. Same discipline as slice 1: a plan doc grounded in the real
-committed code (not roadmap vocabulary), a pre-implementation adversarial review round, then
-implementation, then a post-implementation review round before merge — do not batch step 2
-with step 3 (resource claims) or later steps into one slice, per the roadmap's own "do not
-implement a later step merely because Spec 04 names it" rule, which slice 1's plan (§2) already
-applied once and which slice 1's own round-2 review (§14) reinforced by finding real defects
-even within a single already-narrow slice.
+M7 slice 2 is fully landed on `main` (`eadc857`) — see "Completed this milestone" above. Next
+session should start the next expansion-order slice per the roadmap's 9-step M7 plan: step 3,
+logical Resource Claims with read/write conflict semantics. Same discipline as slices 1/2: a
+plan doc grounded in the real committed code (not roadmap vocabulary — read `TaskV1`/
+`WorkflowRevisionV1` post-slice-2, `workflow_eligibility.py`'s `eligible_tasks`, and
+`run_one_task.py`'s driver as they now exist, with `depends_on` and real DAG scheduling already
+in place), a pre-implementation adversarial review round, then implementation, then a
+post-implementation review round before merge — do not batch step 3 with step 4 (retry) or
+later steps, per the roadmap's own rule, which both prior slices' review rounds have repeatedly
+found real value in enforcing narrowly.
 
-One thing worth deciding early in slice 2's plan: `workflow_eligibility.py`'s linear
-`for task in tasks: ... continue if complete` projection (and `run_workflow()`'s
-sequential-index materialization loop) both assume a strictly linear order — DAG dependency
-validation will need a real design decision about whether that module gets extended in place or
-whether dependency-graph eligibility becomes a separate function/module. Don't assume either
-way going in.
+**Use the now-installed `feedbackops-workflow` toolkit's actual dispatch pipeline this time**,
+not raw `codex exec`/`opencode run` calls — see "Toolkit adopted this session" above for the
+exact gotchas (glm-5.3 model alias, orca execution-mode, cmux session requirement, `--prompt-file`
+requirement for reviewer dispatch, `.gitignore` requirement for `target-verify.sh`). This
+session's own review-dispatch mistakes (defaulting to a stale prompt file, forgetting
+`--execution-mode headless`) are exactly what to avoid repeating. Implementation model routing
+this session was `codex --model gpt-5.6-luna -c model_reasoning_effort=max`; review was
+`zai-coding-plan/glm-5.3` effort `high` via `opencode` — confirm with the user whether the same
+routing applies before assuming it's fixed policy.
 
-Also worth noting for slice 2's own review round: the `zai/glm-5.3` opencode-dispatched manual
-review path hit an account-balance error this round (`Insufficient balance or no resource
-package`) and was skipped in favor of GitHub's automated review + a direct manual pass on the
-PR. Check whether that balance issue is still live before assuming that review path is
-available again.
+**Also worth noting**: this session's implementer (`luna` max) autonomously ran its own internal
+review→fix→recheck loop using the installed toolkit's conventions before the orchestrating
+session ever dispatched an independent review — this happened because the toolkit's
+`AGENTS.md` managed-marker block explicitly tells any dispatched agent to read
+`model-alloc.json`/`conductor-persona.md` before acting. This is a real behavior change from
+slice 1 (which had no such self-directed loop) worth expecting again, not a bug — but it means
+checking `git log`/`.review/ISSUE-N-*` state on the worktree *before* assuming a fresh dispatch
+is starting from nothing.
 
-Also still pending, named explicitly in the M7 slice 1 plan as deferred rather than dropped
-(plan §11): ADR-0009's Reviewer/Verifier split (blocked on risk-tier/Plan-Check machinery that
-doesn't exist anywhere yet) and M3's per-task capability-requirement gap (below) — both
-"likely" M7 territory per the roadmap, not committed to any specific future slice yet.
+**A human adversarial pass on the PR caught a real HIGH finding that neither automated review
+round did** (the schema-v2 canonical-shape divergence in `WorkflowRevisionV1.to_canonical_value()`,
+fixed in `deea8cd`) — a reminder that automated review rounds (even at effort `high`) are not a
+substitute for a manual pass on the final diff before merge, same lesson M4's and M7-slice-1's
+own review rounds already recorded.
+
+Also still pending, named explicitly in the M7 slice 1/2 plans as deferred rather than dropped:
+ADR-0009's Reviewer/Verifier split (blocked on risk-tier/Plan-Check machinery that doesn't exist
+anywhere yet) and M3's per-task capability-requirement gap (below) — both "likely" M7 territory
+per the roadmap, not committed to any specific future slice yet.
 
 ## Explicit scope limits carried forward from M3/M4 (not gaps to silently close later)
 
@@ -397,8 +488,9 @@ when a concrete milestone need makes one of these load-bearing:
   policy, execution-provenance independence, self-verification closed by real distinct
   process identity rather than M2's string inequality).
 - #4 deterministic orchestration after replay/authoritative state is stable (M7 — **slice 1
-  (linear multiple tasks) done, merged PR #49**; remaining: DAG dependency validation, resource
-  claims, retry/repair/replan, fan-in, safe parallelism, Reviewer/Verifier split per ADR-0009;
+  (linear multiple tasks) done, merged PR #49; slice 2 (DAG dependency validation) done, merged
+  PR #50**; remaining: resource claims, retry/repair/replan, fan-in, safe parallelism,
+  Reviewer/Verifier split per ADR-0009;
   also where M3's per-task capability-requirement gap above likely gets closed; M4's
   `lineage`/`observed` source classes stay structurally empty until M7 gives them real
   predecessors/tool output).
